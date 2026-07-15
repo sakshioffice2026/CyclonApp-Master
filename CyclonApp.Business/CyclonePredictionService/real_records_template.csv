@@ -1,0 +1,2 @@
+FlowRateCFM,InletLineSizeIn,OperatingTempC,OperatingPressKPa,GasType,ParticleSizeMicron,ParticleDensityKgm3,EffectiveTurns,InletHeightRatio,InletWidthRatio,OutletDiamRatio,MeasuredEfficiencyPercent,MeasuredPressureDropPa
+2000,12,25,101,Air,15,1500,5,0.5,0.25,0.4,88.5,1050
