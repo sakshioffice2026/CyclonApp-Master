@@ -1,0 +1,26 @@
+﻿@* _Breadcrumb.cshtml - reads ViewBag.Breadcrumbs set by each controller action *@
+@{
+    var crumbs = ViewBag.Breadcrumbs as List<(string Label, string? Url)>;
+}
+@if (crumbs != null && crumbs.Any())
+{
+    <nav aria-label="breadcrumb">
+        <ol class="breadcrumb mb-0">
+            @foreach (var (label, url) in crumbs)
+            {
+                if (url != null)
+                {
+                    <li class="breadcrumb-item"><a href="@url">@label</a></li>
+                }
+                else
+                {
+                    <li class="breadcrumb-item active">@label</li>
+                }
+            }
+        </ol>
+    </nav>
+}
+else
+{
+    <span class="text-muted" style="font-size:13px;">@ViewData["Title"]</span>
+}

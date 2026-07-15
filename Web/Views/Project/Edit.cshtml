@@ -1,0 +1,151 @@
+﻿@using CyclonApp.Database
+@model CyclonApp.Model.ViewModel.ProjectFormViewModel;
+@{
+    ViewData["Title"] = "Edit Project";
+    Layout = "_Layout";
+}
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title"><i class="bi bi-pencil-square me-2 text-primary"></i>Edit Project</h1>
+        <p class="page-subtitle">Update project information</p>
+    </div>
+    <a href="@Url.Action("Detail", new { id = Model.Id })" class="btn btn-outline-secondary">
+        <i class="bi bi-arrow-left me-1"></i>Back to Project
+    </a>
+</div>
+
+<div class="row g-4">
+    <div class="col-lg-7">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title"><i class="bi bi-pencil me-2 text-primary"></i>Edit Details</h5>
+            </div>
+            <div class="card-body">
+                <form asp-action="Edit" asp-route-id="@Model.Id" method="post" id="editForm">
+                    @Html.AntiForgeryToken()
+
+                    @if (!ViewData.ModelState.IsValid)
+                    {
+                        <div class="alert alert-danger py-2 px-3 mb-4" style="font-size:13px; border-radius:8px;">
+                            <div asp-validation-summary="All" class="mb-0"></div>
+                        </div>
+                    }
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-sm-6">
+                            <label asp-for="ProjectNumber" class="form-label">
+                                Project Number <span class="text-danger">*</span>
+                            </label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-hash"></i></span>
+                                <input asp-for="ProjectNumber" class="form-control text-mono fw-600" />
+                            </div>
+                            <span asp-validation-for="ProjectNumber" class="text-danger"></span>
+                        </div>
+                        <div class="col-sm-6">
+                            <label asp-for="Status" class="form-label">Status</label>
+                            <select asp-for="Status" class="form-select">
+                                @foreach (var s in Enum.GetValues<ProjectStatus>())
+                                {
+                                    <option value="@s" selected="@(Model.Status == s)">@s</option>
+                                }
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label asp-for="Name" class="form-label">
+                            Project Name <span class="text-danger">*</span>
+                        </label>
+                        <input asp-for="Name" class="form-control" />
+                        <span asp-validation-for="Name" class="text-danger"></span>
+                    </div>
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-sm-6">
+                            <label asp-for="ClientName" class="form-label">Client / Company Name</label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-building"></i></span>
+                                <input asp-for="ClientName" class="form-control" />
+                            </div>
+                        </div>
+                        <div class="col-sm-6">
+                            <label asp-for="Location" class="form-label">Site / Location</label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-geo-alt"></i></span>
+                                <input asp-for="Location" class="form-control" />
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mb-4">
+                        <label asp-for="Description" class="form-label">Description</label>
+                        <textarea asp-for="Description" class="form-control" rows="4"></textarea>
+                    </div>
+
+                    <div class="d-flex gap-2">
+                        <button type="submit" class="btn btn-primary px-4" id="btnSave">
+                            <i class="bi bi-check2 me-2"></i>Save Changes
+                        </button>
+                        <a href="@Url.Action("Detail", new { id = Model.Id })" class="btn btn-outline-secondary">
+                            Cancel
+                        </a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quick Actions -->
+    <div class="col-lg-5">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title"><i class="bi bi-lightning me-2 text-warning"></i>Quick Actions</h5>
+            </div>
+            <div class="card-body d-flex flex-column gap-2">
+                <a href="@Url.Action("Detail", new { id = Model.Id })" class="btn btn-outline-primary w-100 text-start">
+                    <i class="bi bi-folder2-open me-2"></i>View Project Detail
+                </a>
+                <a href="@Url.Action("Create", "Design", new { projectId = Model.Id })"
+                   class="btn btn-outline-success w-100 text-start">
+                    <i class="bi bi-plus-circle me-2"></i>Add New Design
+                </a>
+                @if (Model.Status != ProjectStatus.Archived)
+                {
+                    <form asp-action="ChangeStatus" method="post">
+                        @Html.AntiForgeryToken()
+                        <input type="hidden" name="id" value="@Model.Id" />
+                        <input type="hidden" name="newStatus" value="Archived" />
+                        <button type="submit"
+                                class="btn btn-outline-warning w-100 text-start"
+                                data-confirm="Archive this project? It will become read-only.">
+                            <i class="bi bi-archive me-2"></i>Archive Project
+                        </button>
+                    </form>
+                }
+                @if (User.IsInRole("ClientAdmin") || User.IsInRole("SuperAdmin"))
+                {
+                    <form asp-action="Delete" method="post">
+                        @Html.AntiForgeryToken()
+                        <input type="hidden" name="id" value="@Model.Id" />
+                        <button type="submit"
+                                class="btn btn-outline-danger w-100 text-start"
+                                data-confirm="Permanently delete this project? This cannot be undone.">
+                            <i class="bi bi-trash me-2"></i>Delete Project
+                        </button>
+                    </form>
+                }
+            </div>
+        </div>
+    </div>
+
+</div>
+
+@section Scripts {
+    <script>
+        document.getElementById('editForm').addEventListener('submit', function () {
+            setButtonLoading(document.getElementById('btnSave'), true);
+        });
+    </script>
+}

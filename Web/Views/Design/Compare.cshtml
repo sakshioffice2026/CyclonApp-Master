@@ -1,0 +1,367 @@
+﻿@model CompareViewModel;
+@{
+    ViewData["Title"] = "Compare Revisions — " + Model.TagNumber;
+    Layout = "_Layout";
+}
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title"><i class="bi bi-columns-gap me-2 text-info"></i>Compare Revisions</h1>
+        <p class="page-subtitle">Tag: <strong class="text-mono">@Model.TagNumber</strong></p>
+    </div>
+    <a href="@Url.Action("Detail", new { id = Model.DesignId })" class="btn btn-outline-secondary">
+        <i class="bi bi-arrow-left me-1"></i>Back to Design
+    </a>
+</div>
+
+<!-- Revision Selector -->
+<div class="card mb-4">
+    <div class="card-body">
+        <form method="get" asp-action="Compare" class="row g-3 align-items-end">
+            <input type="hidden" name="designId" value="@Model.DesignId" />
+            <div class="col-sm-4">
+                <label class="form-label" style="font-size:12.5px; font-weight:600;">
+                    <span class="badge bg-primary me-1">A</span> Revision A (Base)
+                </label>
+                <select name="revAId" class="form-select form-select-sm">
+                    <option value="">— Select —</option>
+                    @foreach (var r in Model.AllRevisions)
+                    {
+                        <option value="@r.Id" selected="@(Model.RevAId == r.Id)">
+                            Rev @r.RevisionNumber — @(r.RevisionNote ?? r.CreatedAt.ToString("dd MMM yy"))
+                            @(r.HasResults ? $" [{r.Efficiency?.ToString("F1")}%]" : " [no results]")
+                        </option>
+                    }
+                </select>
+            </div>
+            <div class="col-sm-4">
+                <label class="form-label" style="font-size:12.5px; font-weight:600;">
+                    <span class="badge bg-info text-dark me-1">B</span> Revision B (Compare)
+                </label>
+                <select name="revBId" class="form-select form-select-sm">
+                    <option value="">— Select —</option>
+                    @foreach (var r in Model.AllRevisions)
+                    {
+                        <option value="@r.Id" selected="@(Model.RevBId == r.Id)">
+                            Rev @r.RevisionNumber — @(r.RevisionNote ?? r.CreatedAt.ToString("dd MMM yy"))
+                            @(r.HasResults ? $" [{r.Efficiency?.ToString("F1")}%]" : " [no results]")
+                        </option>
+                    }
+                </select>
+            </div>
+            <div class="col-sm-4">
+                <button type="submit" class="btn btn-primary btn-sm w-100">
+                    <i class="bi bi-columns-gap me-1"></i>Compare
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+@if (Model.RevA == null || Model.RevB == null)
+{
+    <div class="card">
+        <div class="card-body empty-state">
+            <i class="bi bi-columns-gap"></i>
+            <h5>Select two revisions above to compare</h5>
+            <p class="text-muted" style="font-size:13px;">Choose Revision A and Revision B, then click Compare.</p>
+        </div>
+    </div>
+}
+else
+{
+    var A = Model.RevA;
+    var B = Model.RevB;
+
+    // Helper: delta class
+    string DeltaClass(double a, double b, bool higherIsBetter = true)
+    {
+        if (Math.Abs(a - b) < 0.001) return "delta-same";
+        return (b > a) == higherIsBetter ? "delta-better" : "delta-worse";
+    }
+    string DeltaText(double a, double b, string fmt = "F2")
+    {
+        var d = b - a;
+        return (d >= 0 ? "+" : "") + d.ToString(fmt);
+    }
+
+    <!-- ── Header Row ────────────────────────────────────────────────────── -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-6">
+            <div class="compare-header rev-a">
+                <div class="rev-badge">A</div>
+                <div>
+                    <div class="rev-label">Revision @A.RevisionNumber</div>
+                    <div class="rev-sub">@(A.RevisionNote ?? A.CalculatedAt.ToString("dd MMM yyyy HH:mm"))</div>
+                </div>
+                <a href="@Url.Action("Results", new { id = A.RevisionId })"
+                   class="btn btn-outline-light btn-sm ms-auto">
+                    <i class="bi bi-bar-chart me-1"></i>View
+                </a>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="compare-header rev-b">
+                <div class="rev-badge rev-badge-b">B</div>
+                <div>
+                    <div class="rev-label">Revision @B.RevisionNumber</div>
+                    <div class="rev-sub">@(B.RevisionNote ?? B.CalculatedAt.ToString("dd MMM yyyy HH:mm"))</div>
+                </div>
+                <a href="@Url.Action("Results", new { id = B.RevisionId })"
+                   class="btn btn-outline-light btn-sm ms-auto">
+                    <i class="bi bi-bar-chart me-1"></i>View
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Results Comparison Table ──────────────────────────────────────── -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5 class="card-title"><i class="bi bi-graph-up me-2 text-success"></i>Calculated Results</h5>
+            <span class="legend-row">
+                <span class="legend-chip delta-better">▲ Better</span>
+                <span class="legend-chip delta-worse">▼ Worse</span>
+                <span class="legend-chip delta-same">= Same</span>
+            </span>
+        </div>
+        <div class="table-responsive">
+            <table class="table compare-table mb-0">
+                <thead>
+                    <tr>
+                        <th style="width:30%">Parameter</th>
+                        <th style="width:25%">Rev A</th>
+                        <th style="width:25%">Rev B</th>
+                        <th style="width:20%">Delta (B−A)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @{
+                        var results = new[]
+                        {
+                ("Efficiency (%)",       A.Efficiency,       B.Efficiency,       "F2", true),
+                ("Cut Diameter (µm)",    A.CutDiameterMicron,B.CutDiameterMicron,"F3", false),
+                ("Pressure Drop (Pa)",   A.PressureDropPa,   B.PressureDropPa,   "F1", false),
+                ("Pressure Drop (mmWC)", A.PressureDropMmWc, B.PressureDropMmWc, "F2", false),
+                ("Inlet Velocity (m/s)", A.InletVelocityMs,  B.InletVelocityMs,  "F3", false),
+                ("Gas Density (kg/m³)",  A.GasDensityKgm3,   B.GasDensityKgm3,   "F4", false),
+                };
+                    }
+                    @foreach (var (label, aVal, bVal, fmt, hib) in results)
+                    {
+                        var dc = DeltaClass(aVal, bVal, hib);
+                        <tr>
+                            <td class="fw-500">@label</td>
+                            <td class="text-mono rev-a-val">@aVal.ToString(fmt)</td>
+                            <td class="text-mono rev-b-val">@bVal.ToString(fmt)</td>
+                            <td><span class="delta-badge @dc">@DeltaText(aVal, bVal, fmt)</span></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ── Dimensions Comparison ─────────────────────────────────────────── -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5 class="card-title"><i class="bi bi-rulers me-2 text-primary"></i>Dimensions (inches)</h5>
+        </div>
+        <div class="table-responsive">
+            <table class="table compare-table mb-0">
+                <thead>
+                    <tr>
+                        <th style="width:30%">Dimension</th>
+                        <th style="width:25%">Rev A</th>
+                        <th style="width:25%">Rev B</th>
+                        <th style="width:20%">Delta</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @{
+                        var dims = new[]
+                        {
+                ("Barrel Dia Dc (in)",   A.BarrelDiameterIn, B.BarrelDiameterIn),
+                ("Inlet Height H (in)",  A.InletHeightIn,    B.InletHeightIn),
+                ("Inlet Width W (in)",   A.InletWidthIn,     B.InletWidthIn),
+                ("Barrel Height Lb (in)",A.BarrelHeightIn,   B.BarrelHeightIn),
+                ("Cone Height Lc (in)",  A.ConeHeightIn,     B.ConeHeightIn),
+                ("Exhaust Dia De (in)",  A.ExhaustDiaIn,     B.ExhaustDiaIn),
+                ("Bottom Outlet Dd (in)",A.BottomOutletIn,   B.BottomOutletIn),
+                ("Total Height (in)",    A.TotalHeightIn,    B.TotalHeightIn),
+                };
+                    }
+                    @foreach (var (label, aVal, bVal) in dims)
+                    {
+                        var delta = bVal - aVal;
+                        var dc = Math.Abs(delta) < 0.001 ? "delta-same" : "delta-neutral";
+                        <tr>
+                            <td class="fw-500">@label</td>
+                            <td class="text-mono rev-a-val">@aVal.ToString("F3")"</td>
+                            <td class="text-mono rev-b-val">@bVal.ToString("F3")"</td>
+                            <td><span class="delta-badge @dc">@((delta >= 0 ? "+" : "") + delta.ToString("F3"))"</span></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- ── Input Comparison ──────────────────────────────────────────────── -->
+    <div class="card">
+        <div class="card-header">
+            <h5 class="card-title"><i class="bi bi-sliders me-2 text-secondary"></i>Inputs Comparison</h5>
+        </div>
+        <div class="table-responsive">
+            <table class="table compare-table mb-0">
+                <thead>
+                    <tr>
+                        <th style="width:30%">Input</th>
+                        <th style="width:35%">Rev A</th>
+                        <th style="width:35%">Rev B</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @{
+                        var inputs = new[]
+                        {
+                ("Flow Rate (CFM)",    A.FlowRateCFM.ToString(),    B.FlowRateCFM.ToString()),
+                ("Inlet Size (in)",   A.InletLineSizeIn.ToString(), B.InletLineSizeIn.ToString()),
+                ("Gas Type",           A.GasType,                   B.GasType),
+                ("Temperature (°C)",  A.OperatingTempC.ToString(),  B.OperatingTempC.ToString()),
+                ("Particle (µm)",     A.ParticleSizeMicron.ToString(), B.ParticleSizeMicron.ToString()),
+                ("Density (kg/m³)",   A.ParticleDensityKgm3.ToString(), B.ParticleDensityKgm3.ToString()),
+                ("Eff. Turns (Nt)",   A.EffectiveTurns.ToString(),  B.EffectiveTurns.ToString()),
+                ("No. Cyclones",      A.NumberOfCyclones.ToString(), B.NumberOfCyclones.ToString()),
+                };
+                    }
+                    @foreach (var (label, aVal, bVal) in inputs)
+                    {
+                        var changed = aVal != bVal;
+                        <tr class="@(changed ? "row-changed" : "")">
+                            <td class="fw-500">@label @(changed ? "<span class='badge bg-warning text-dark ms-1' style='font-size:10px;'>changed</span>" : "")</td>
+                            <td class="text-mono rev-a-val">@aVal</td>
+                            <td class="text-mono rev-b-val">@bVal</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+}
+
+@section Styles {
+    <style>
+        /* .compare-header { */
+        /*     display: flex; */
+        /*     align-items: center; */
+        /*     gap: 14px; */
+        /*     padding: 16px 20px; */
+        /*     border-radius: 10px; */
+        /* } */
+
+        /* .rev-a { */
+        /*     background: linear-gradient(135deg, #1a56db, #1240a8); */
+        /*     color: #fff; */
+        /* } */
+
+        /* .rev-b { */
+        /*     background: linear-gradient(135deg, #0891b2, #0e7490); */
+        /*     color: #fff; */
+        /* } */
+
+        .rev-badge {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: rgba(255,255,255,.25);
+            color: #fff;
+            font-size: 16px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .rev-label {
+            font-size: 15px;
+            font-weight: 700;
+        }
+
+        .rev-sub {
+            font-size: 12px;
+            opacity: .8;
+        }
+
+        .compare-table th {
+            background: var(--surface-2);
+            font-size: 12px;
+        }
+
+        .compare-table td {
+            font-size: 13px;
+            vertical-align: middle;
+        }
+
+        .rev-a-val {
+            color: #1a56db;
+            font-weight: 600;
+        }
+
+        .rev-b-val {
+            color: #0891b2;
+            font-weight: 600;
+        }
+
+        /* .delta-badge { */
+        /*     display: inline-block; */
+        /*     padding: 2px 8px; */
+        /*     border-radius: 20px; */
+        /*     font-size: 12px; */
+        /*     font-weight: 600; */
+        /*     font-family: var(--font-mono); */
+        /* } */
+
+        .delta-better {
+            background: #dcfce7;
+            color: #15803d;
+        }
+
+        .delta-worse {
+            background: #fee2e2;
+            color: #b91c1c;
+        }
+
+        .delta-same {
+            background: #f1f5f9;
+            color: #64748b;
+        }
+
+        .delta-neutral {
+            background: #f1f5f9;
+            color: #64748b;
+        }
+
+        .legend-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .legend-chip {
+            font-size: 11.5px;
+            padding: 2px 8px;
+            border-radius: 20px;
+            font-weight: 600;
+        }
+
+        .row-changed {
+            background: #fffbeb;
+        }
+
+        .fw-500 {
+            font-weight: 500;
+        }
+    </style>
+}

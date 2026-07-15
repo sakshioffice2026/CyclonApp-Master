@@ -1,0 +1,109 @@
+﻿@model CyclonApp.Model.ViewModel.ProfileViewModel;
+@{
+    ViewData["Title"] = "My Profile";
+    Layout = "_Layout";
+}
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title">My Profile</h1>
+        <p class="page-subtitle">Update your personal information and settings</p>
+    </div>
+</div>
+
+<div class="row g-4">
+
+    <!-- Profile form -->
+    <div class="col-lg-7">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title"><i class="bi bi-person me-2 text-primary"></i>Personal Information</h5>
+            </div>
+            <div class="card-body">
+                <form asp-action="Profile" method="post">
+                    @Html.AntiForgeryToken()
+                    @if (TempData["Success"] != null)
+                    {
+                        <div class="alert alert-success py-2 px-3 mb-3" style="font-size:13px;border-radius:8px;">
+                            <i class="bi bi-check-circle me-2"></i>@TempData["Success"]
+                        </div>
+                    }
+                    <div class="row g-3 mb-3">
+                        <div class="col-sm-6">
+                            <label asp-for="FirstName" class="form-label">First Name</label>
+                            <input asp-for="FirstName" class="form-control" />
+                            <span asp-validation-for="FirstName" class="text-danger"></span>
+                        </div>
+                        <div class="col-sm-6">
+                            <label asp-for="LastName" class="form-label">Last Name</label>
+                            <input asp-for="LastName" class="form-control" />
+                            <span asp-validation-for="LastName" class="text-danger"></span>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label asp-for="Designation" class="form-label">Designation</label>
+                        <input asp-for="Designation" class="form-control" placeholder="e.g. Senior Engineer" />
+                    </div>
+                    <div class="mb-4">
+                        <label class="form-label">Email Address</label>
+                        <input type="text" value="@Model.Email" class="form-control" disabled />
+                        <div class="form-text">Email cannot be changed. Contact admin if needed.</div>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="bi bi-check2 me-1"></i>Save Changes
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Account info + change password -->
+    <div class="col-lg-5">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="card-title"><i class="bi bi-building me-2 text-info"></i>Account Info</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-borderless mb-0" style="font-size:13.5px;">
+                    <tr>
+                        <td class="text-muted fw-500" style="width:40%">Tenant</td>
+                        <td class="fw-600">@(Model.TenantName ?? "—")</td>
+                    </tr>
+                    <tr>
+                        <td class="text-muted">Role</td>
+                        <td>
+                            @if (Model.Role == "SuperAdmin")
+                            {
+                                <span class="badge bg-danger">SuperAdmin</span>
+                            }
+                            else if (Model.Role == "ClientAdmin")
+                            {
+                                <span class="badge bg-warning text-dark">ClientAdmin</span>
+                            }
+                            else if (Model.Role == "Engineer")
+                            {
+                                <span class="badge bg-primary">Engineer</span>
+                            }
+                            else
+                            {
+                                <span class="badge bg-secondary">Viewer</span>
+                            }
+                        </td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title"><i class="bi bi-shield-lock me-2 text-warning"></i>Change Password</h5>
+            </div>
+            <div class="card-body">
+                <a href="@Url.Action("ChangePassword")" class="btn btn-outline-warning w-100">
+                    <i class="bi bi-key me-2"></i>Change Password
+                </a>
+            </div>
+        </div>
+    </div>
+
+</div>

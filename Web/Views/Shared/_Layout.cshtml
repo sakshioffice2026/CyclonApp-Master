@@ -1,0 +1,200 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@ViewData["Title"] — Cyclone Design App</title>
+
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+    <!-- Bootstrap 5.3 -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+
+    <!-- Bootstrap Icons -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet" />
+
+    <!-- App CSS -->
+    <link rel="stylesheet" href="~/css/global.css" asp-append-version="true" />
+
+
+    <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+
+    @await RenderSectionAsync("Styles", required: false)
+</head>
+<body class="@(User.Identity?.IsAuthenticated == true ? "has-sidebar" : "")">
+
+    @if (User.Identity?.IsAuthenticated == true)
+    {
+        <!-- ── SIDEBAR ───────────────────────────────────────────────────────── -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <a class="sidebar-logo" href="@Url.Action("Index","Dashboard")" style="text-decoration:none;cursor:pointer">
+                    <div class="logo-icon"><i class="bi bi-wind"></i></div>
+                    <div class="logo-text">
+                        <span class="logo-title">CycloneApp</span>
+                        <span class="logo-sub">Design Suite</span>
+                    </div>
+                </a>
+                <button class="sidebar-toggle-btn d-lg-none" id="sidebarClose">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+
+            <nav class="sidebar-nav">
+                <div class="nav-section-label">Main</div>
+                <a class="sidebar-link @(ViewContext.RouteData.Values["controller"]?.ToString() == "Dashboard" ? "active" : "")"
+                   href="@Url.Action("Index","Dashboard")">
+                    <i class="bi bi-grid-1x2"></i>
+                    <span>Dashboard</span>
+                </a>
+
+                <div class="nav-section-label mt-3">Workspace</div>
+                <a class="sidebar-link @(ViewContext.RouteData.Values["controller"]?.ToString() == "Project" ? "active" : "")"
+                   href="@Url.Action("Index","Project")">
+                    <i class="bi bi-folder2-open"></i>
+                    <span>Projects</span>
+                </a>
+                <a class="sidebar-link @(ViewContext.RouteData.Values["controller"]?.ToString() == "Design" ? "active" : "")"
+                   href="@Url.Action("Index","Design")">
+                    <i class="bi bi-calculator"></i>
+                    <span>Designs</span>
+                </a>
+
+                <div class="nav-section-label mt-3">Reports</div>
+                <a class="sidebar-link" href="@Url.Action("Index","Export")">
+                    <i class="bi bi-file-earmark-pdf"></i>
+                    <span>Export / Reports</span>
+                </a>
+
+                @if (User.IsInRole("SuperAdmin") || User.IsInRole("ClientAdmin"))
+                {
+                    <div class="nav-section-label mt-3">Administration</div>
+                    <a class="sidebar-link @(ViewContext.RouteData.Values["controller"]?.ToString() == "Admin" ? "active" : "")"
+                       href="@Url.Action("Index","Admin")">
+                        <i class="bi bi-shield-lock"></i>
+                        <span>Admin Panel</span>
+                    </a>
+                    @if (User.IsInRole("SuperAdmin"))
+                    {
+                        <a class="sidebar-link" href="@Url.Action("Tenants","Admin")">
+                            <i class="bi bi-building"></i>
+                            <span>Tenants</span>
+                        </a>
+                    }
+                    <a class="sidebar-link" href="@Url.Action("Users","Admin")">
+                        <i class="bi bi-people"></i>
+                        <span>Users</span>
+                    </a>
+                }
+            </nav>
+
+            <div class="sidebar-footer">
+                <a class="sidebar-link" href="@Url.Action("Profile","Account")">
+                    <div class="user-avatar">@(User.Identity?.Name?.Substring(0, 1).ToUpper() ?? "?")</div>
+                    <div class="user-info">
+                        <span class="user-name">@User.Identity?.Name</span>
+                        <span class="user-role">
+                            @if (User.IsInRole("SuperAdmin"))
+                            {
+                                <text>Super Admin</text>
+                            }
+                            else if (User.IsInRole("ClientAdmin"))
+                            {
+                                <text>Client Admin</text>
+                            }
+                            else if (User.IsInRole("Engineer"))
+                            {
+                                <text>Engineer</text>
+                            }
+                            else
+                            {
+                                <text>Viewer</text>
+                            }
+                        </span>
+                    </div>
+                </a>
+                <form asp-action="Logout" asp-controller="Account" method="post" class="d-inline">
+                    @Html.AntiForgeryToken()
+                    <button type="submit" class="btn-logout" title="Logout">
+                        <i class="bi bi-box-arrow-right"></i>
+                    </button>
+                </form>
+            </div>
+        </aside>
+
+        <!-- ── TOPBAR ────────────────────────────────────────────────────────── -->
+        <div class="topbar">
+            <button class="sidebar-toggle-btn d-lg-none" id="sidebarOpen">
+                <i class="bi bi-list"></i>
+            </button>
+            <div class="topbar-breadcrumb">
+                @await Html.PartialAsync("_Breadcrumb")
+            </div>
+            <div class="topbar-right">
+                <span class="topbar-tenant">
+                    <i class="bi bi-building me-1"></i>
+                    @ViewBag.TenantName
+                </span>
+            </div>
+        </div>
+
+        <!-- ── MAIN CONTENT ──────────────────────────────────────────────────── -->
+        <main class="main-content">
+            <!-- Toast Notifications -->
+            @if (TempData["Success"] != null)
+            {
+                <div class="alert-toast alert-toast-success" id="toastSuccess">
+                    <i class="bi bi-check-circle-fill me-2"></i>@TempData["Success"]
+                    <button type="button" onclick="this.parentElement.remove()"><i class="bi bi-x"></i></button>
+                </div>
+            }
+            @if (TempData["Error"] != null)
+            {
+                <div class="alert-toast alert-toast-error" id="toastError">
+                    <i class="bi bi-exclamation-circle-fill me-2"></i>@TempData["Error"]
+                    <button type="button" onclick="this.parentElement.remove()"><i class="bi bi-x"></i></button>
+                </div>
+            }
+
+            @RenderBody()
+        </main>
+
+        <!-- Sidebar overlay for mobile -->
+        <div class="sidebar-overlay d-lg-none" id="sidebarOverlay"></div>
+    }
+    else
+    {
+        <!-- ── UNAUTHENTICATED LAYOUT ──────────────────────────────────────── -->
+        <main class="auth-layout">
+            @RenderBody()
+        </main>
+    }
+
+    <!-- Bootstrap 5 JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+    <!-- App JS -->
+    <script src="~/js/site.js" asp-append-version="true"></script>
+
+    <!-- Auto-dismiss toasts -->
+    <script>
+        document.querySelectorAll('.alert-toast').forEach(function(el) {
+            setTimeout(function() { el.style.opacity='0'; setTimeout(()=>el.remove(),400); }, 4000);
+        });
+        // Sidebar toggle (mobile)
+        document.getElementById('sidebarOpen')?.addEventListener('click', function() {
+            document.getElementById('sidebar').classList.add('open');
+            document.getElementById('sidebarOverlay').classList.add('active');
+        });
+        ['sidebarClose','sidebarOverlay'].forEach(id => {
+            document.getElementById(id)?.addEventListener('click', function() {
+                document.getElementById('sidebar').classList.remove('open');
+                document.getElementById('sidebarOverlay').classList.remove('active');
+            });
+        });
+    </script>
+
+    @await RenderSectionAsync("Scripts", required: false)
+</body>
+</html>

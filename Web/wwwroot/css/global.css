@@ -1,0 +1,444 @@
+﻿
+/* ═══════════════════════════════════════════════════════════════════
+   1. FONT WEIGHTS — used everywhere
+   ═══════════════════════════════════════════════════════════════════ */
+
+.fw-500 {
+    font-weight: 500;
+}
+
+.fw-600 {
+    font-weight: 600;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   2. KPI CARDS — used in Design/Detail.cshtml & Design/Results.cshtml
+   ═══════════════════════════════════════════════════════════════════ */
+
+.kpi-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    box-shadow: var(--shadow);
+}
+
+.kpi-label {
+    font-size: 11.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+
+.kpi-value {
+    font-size: 26px;
+    font-weight: 700;
+    line-height: 1.1;
+}
+
+.kpi-sub {
+    font-size: 11.5px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   3. CYCLONE TYPE BADGE — used in Design/Index.cshtml & Design/Detail.cshtml
+   ═══════════════════════════════════════════════════════════════════ */
+
+.cyclone-type-badge {
+    background: var(--primary-light);
+    color: var(--primary-dark);
+    font-size: 11.5px;
+    font-weight: 500;
+    padding: 3px 9px;
+    border-radius: 20px;
+    white-space: nowrap;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   4. WORKFLOW STEPS — used in Project/Create.cshtml
+   ═══════════════════════════════════════════════════════════════════ */
+
+.workflow-steps {
+    padding: 8px 0;
+}
+
+.workflow-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+    .workflow-step:last-child {
+        border-bottom: none;
+    }
+
+.ws-num {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+
+.ws-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.ws-desc {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   5. CYCLONE TYPE SELECTOR GRID — used in Design/Create.cshtml
+   ═══════════════════════════════════════════════════════════════════ */
+
+.cyclone-type-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+    margin-top: 6px;
+}
+
+.ct-card {
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 10px;
+    cursor: pointer;
+    transition: all .18s;
+    text-align: center;
+}
+
+    .ct-card:hover,
+    .ct-card.selected {
+        border-color: var(--primary);
+        background: var(--primary-light);
+    }
+
+.ct-icon {
+    font-size: 26px;
+    color: var(--primary);
+    margin-bottom: 6px;
+}
+
+.ct-code {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--text-muted);
+}
+
+.ct-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.3;
+    margin-top: 3px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   6. REVISION COMPARE — used in Design/Compare.cshtml
+   ═══════════════════════════════════════════════════════════════════ */
+
+.compare-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 16px 20px;
+    border-radius: 10px;
+}
+
+.rev-a {
+    background: linear-gradient(135deg, #1a56db, #1240a8);
+    color: #fff;
+}
+
+.rev-b {
+    background: linear-gradient(135deg, #0891b2, #0e7490);
+    color: #fff;
+}
+
+.rev-badge {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: rgba(255,255,255,.25);
+    color: #fff;
+    font-size: 16px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.rev-label {
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.rev-sub {
+    font-size: 12px;
+    opacity: .8;
+}
+
+.compare-table th {
+    background: var(--surface-2);
+    font-size: 12px;
+}
+
+.compare-table td {
+    font-size: 13px;
+    vertical-align: middle;
+}
+
+.rev-a-val {
+    color: #1a56db;
+    font-weight: 600;
+}
+
+.rev-b-val {
+    color: #0891b2;
+    font-weight: 600;
+}
+
+.delta-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: var(--font-mono);
+}
+
+.delta-better {
+    background: #dcfce7;
+    color: #15803d;
+}
+
+.delta-worse {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+.delta-same,
+.delta-neutral {
+    background: #f1f5f9;
+    color: #64748b;
+}
+
+.legend-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.legend-chip {
+    font-size: 11.5px;
+    padding: 2px 8px;
+    border-radius: 20px;
+    font-weight: 600;
+}
+
+.row-changed {
+    background: #fffbeb;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   7. PROJECT TABLE — used in Project/Index.cshtml
+   ═══════════════════════════════════════════════════════════════════ */
+
+.dropdown-toggle.no-caret::after {
+    display: none;
+}
+
+/* Latest revision highlight — used in Design/Detail.cshtml */
+.tr-latest {
+    background: rgba(26, 86, 219, .04);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   8. ROLE SELECTOR — used in Account/Register.cshtml
+   ═══════════════════════════════════════════════════════════════════ */
+
+.role-selector {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.role-option {
+    flex: 1;
+    min-width: 110px;
+}
+
+.role-radio {
+    display: none;
+}
+
+.role-label {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 14px 10px;
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    text-align: center;
+    transition: border-color .15s, background .15s;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+.role-icon {
+    font-size: 20px;
+}
+
+.role-radio:checked + .role-label {
+    border-color: var(--primary);
+    background: var(--primary-light);
+    color: var(--primary-dark);
+}
+
+.role-label:hover {
+    border-color: var(--primary);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   9. CHANGE PASSWORD PAGE — used in Account/ChangePassword.cshtml
+   ═══════════════════════════════════════════════════════════════════ */
+
+.change-card {
+    background: #fff;
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    width: 100%;
+    max-width: 440px;
+    overflow: hidden;
+}
+
+.card-top {
+    background: linear-gradient(135deg, #1a56db, #0e3fad);
+    padding: 32px 24px;
+    text-align: center;
+}
+
+    .card-top .icon-wrap {
+        background: rgba(255,255,255,0.15);
+        border-radius: 14px;
+        width: 56px;
+        height: 56px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 12px;
+    }
+
+    .card-top h4 {
+        color: #fff;
+        font-weight: 700;
+        font-size: 20px;
+        margin-bottom: 4px;
+    }
+
+    .card-top p {
+        color: rgba(255,255,255,0.75);
+        font-size: 13px;
+        margin: 0;
+    }
+
+.card-body-inner {
+    padding: 28px 28px 24px;
+}
+
+.btn-toggle {
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-left: none;
+    color: #6b7280;
+    padding: 0 12px;
+}
+
+    .btn-toggle:hover {
+        background: #f3f4f6;
+        color: #374151;
+    }
+
+.strength-wrap {
+    margin-bottom: 20px;
+}
+
+    .strength-wrap .labels {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 5px;
+    }
+
+        .strength-wrap .labels span {
+            font-size: 11px;
+            color: #9ca3af;
+        }
+
+#strengthLabel {
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.btn-change {
+    background: linear-gradient(135deg, #1a56db, #0e3fad);
+    border: none;
+    color: #fff;
+    width: 100%;
+    padding: 11px;
+    font-size: 14px;
+    font-weight: 600;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: opacity .2s;
+}
+
+    .btn-change:hover {
+        opacity: 0.9;
+        color: #fff;
+    }
+
+.back-link {
+    display: block;
+    text-align: center;
+    margin-top: 18px;
+    font-size: 13px;
+    color: #6b7280;
+    text-decoration: none;
+}
+
+    .back-link:hover {
+        color: #1a56db;
+    }

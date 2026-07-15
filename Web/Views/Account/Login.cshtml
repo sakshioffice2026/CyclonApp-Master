@@ -1,0 +1,114 @@
+﻿@model CyclonApp.Model.ViewModel.LoginViewModel; 
+@{
+    ViewData["Title"] = "Sign In";
+    Layout = "_Layout";
+}
+
+<div class="auth-card">
+
+    <div class="auth-card-header">
+        <div class="auth-card-logo">
+            <i class="bi bi-wind"></i>
+        </div>
+        <h1 class="auth-card-title">Welcome back</h1>
+        <p class="auth-card-subtitle">Cyclone Design Suite — sign in to continue</p>
+    </div>
+
+    <div class="auth-card-body">
+
+        @if (!ViewData.ModelState.IsValid)
+        {
+            <div class="alert alert-danger py-2 px-3 mb-4" role="alert" style="font-size:13px; border-radius:8px;">
+                <i class="bi bi-exclamation-circle me-2"></i>
+                <asp-validation-summary asp-validation-summary="All" class="d-inline mb-0" />
+            </div>
+        }
+
+        <form asp-action="Login" asp-controller="Account" method="post">
+            @Html.AntiForgeryToken()
+            <input type="hidden" asp-for="ReturnUrl" />
+
+            <div class="mb-3">
+                <label asp-for="Email" class="form-label">Email Address</label>
+                <div class="input-group">
+                    <span class="input-group-text"><i class="bi bi-envelope"></i></span>
+                    <input asp-for="Email"
+                           class="form-control"
+                           placeholder="you@company.com"
+                           autocomplete="email"
+                           autofocus />
+                </div>
+                <span asp-validation-for="Email" class="text-danger"></span>
+            </div>
+
+            <div class="mb-3">
+                <div class="d-flex justify-content-between align-items-center mb-1">
+                    <label asp-for="Password" class="form-label mb-0">Password</label>
+                    <a href="@Url.Action("ChangePassword","Account")"
+                       style="font-size:12px; color:var(--primary); text-decoration:none;">
+                        Change password?
+                    </a>
+                </div>
+                <div class="input-group">
+                    <span class="input-group-text"><i class="bi bi-lock"></i></span>
+                    <input asp-for="Password"
+                           class="form-control"
+                           placeholder="Enter your password"
+                           autocomplete="current-password"
+                           id="passwordInput" />
+                    <button class="input-group-text btn" type="button"
+                            onclick="togglePassword()" title="Show/Hide password">
+                        <i class="bi bi-eye" id="eyeIcon"></i>
+                    </button>
+                </div>
+                <span asp-validation-for="Password" class="text-danger"></span>
+                <div class="text-center mt-3">
+                    <span>New user?</span>
+                    <a asp-controller="Account"
+                       asp-action="Register">
+                        Register here
+                    </a>
+                </div>
+            </div>
+
+            <div class="mb-4">
+                <div class="form-check">
+                    <input asp-for="RememberMe" class="form-check-input" id="rememberMe" />
+                    <label class="form-check-label" for="rememberMe" style="font-size:13px;">
+                        Keep me signed in for 8 hours
+                    </label>
+                </div>
+            </div>
+
+            <button type="submit" class="btn btn-primary w-100 py-2" style="font-size:14px; font-weight:600;">
+                <i class="bi bi-box-arrow-in-right me-2"></i>Sign In
+            </button>
+
+        </form>
+
+        @if (TempData["ResetLink"] != null)
+        {
+            <div class="alert alert-info mt-3 py-2 px-3" style="font-size:12px; border-radius:8px;">
+                <strong>Dev Reset Link:</strong><br />
+                <a href="@TempData["ResetLink"]" style="word-break:break-all;">@TempData["ResetLink"]</a>
+            </div>
+        }
+
+    </div>
+</div>
+
+@section Scripts {
+    <script>
+        function togglePassword() {
+            var input = document.getElementById('passwordInput');
+            var icon  = document.getElementById('eyeIcon');
+            if (input.type === 'password') {
+                input.type = 'text';
+                icon.className = 'bi bi-eye-slash';
+            } else {
+                input.type = 'password';
+                icon.className = 'bi bi-eye';
+            }
+        }
+    </script>
+}

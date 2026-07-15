@@ -1,0 +1,45 @@
+﻿@using CyclonApp.Database
+@model List<AppUser>
+@{
+    ViewData["Title"] = "Users"; Layout = "_Layout";
+}
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Users</h1>
+        <p class="page-subtitle">Manage user accounts</p>
+    </div>
+    <a asp-action="Register" asp-controller="Account" class="btn btn-primary">
+        <i class="bi bi-person-plus me-1"></i>Add User
+    </a>
+</div>
+
+<div class="card">
+    <div class="table-responsive">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Role</th>
+                    <th>Tenant</th>
+                    <th>Active</th>
+                    <th>Last Login</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var u in Model)
+                {
+                    <tr>
+                        <td>@u.DisplayName</td>
+                        <td>@u.Email</td>
+                        <td>@(u.UserRole?.RoleName ?? "—")</td>
+                        <td>@(u.Tenant?.Name ?? "—")</td>
+                        <td>@(u.IsActive ? "✓" : "—")</td>
+                        <td>@(u.LastLoginAt?.ToString("dd MMM yyyy") ?? "Never")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>

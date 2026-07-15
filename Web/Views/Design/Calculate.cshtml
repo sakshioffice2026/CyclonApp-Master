@@ -1,0 +1,305 @@
+﻿@model DesignCalculateViewModel;
+@{
+    ViewData["Title"] = "Calculate — " + Model.TagNumber;
+    Layout = "_Layout";
+}
+
+<div class="page-header">
+    <div>
+        <div class="d-flex align-items-center gap-2 mb-1">
+            <span class="text-mono text-muted" style="font-size:13px;">@Model.TagNumber</span>
+            <span class="badge bg-secondary">Rev @Model.RevisionNumber</span>
+        </div>
+        <h1 class="page-title"><i class="bi bi-calculator me-2 text-primary"></i>Cyclone Design Inputs</h1>
+        <p class="page-subtitle">@Model.CycloneTypeName &nbsp;·&nbsp; Project: @Model.ProjectName</p>
+    </div>
+    <a href="@Url.Action("Detail", new { id = Model.DesignId })" class="btn btn-outline-secondary">
+        <i class="bi bi-arrow-left me-1"></i>Back
+    </a>
+</div>
+
+<form asp-action="Calculate" method="post" id="calcForm">
+    @Html.AntiForgeryToken()
+    <input type="hidden" asp-for="DesignId" />
+    <input type="hidden" asp-for="ProjectId" />
+    <input type="hidden" asp-for="CycloneTypeId" />
+    <input type="hidden" asp-for="RevisionNumber" />
+
+    @if (!ViewData.ModelState.IsValid)
+    {
+        <div class="alert alert-danger py-2 px-3 mb-3" style="font-size:13px;border-radius:8px;">
+            <i class="bi bi-exclamation-circle me-2"></i>
+            <div asp-validation-summary="All" class="d-inline mb-0"></div>
+        </div>
+    }
+
+    <div class="row g-4">
+        <!-- ── Left: Input Sections ──────────────────────────────────── -->
+        <div class="col-xl-8">
+
+            <!-- Revision Note -->
+            <div class="card mb-3">
+                <div class="card-body py-3">
+                    <div class="row align-items-center g-2">
+                        <div class="col-sm-3 col-md-2">
+                            <label class="form-label mb-0" style="font-size:12px; font-weight:600;">Revision Note</label>
+                        </div>
+                        <div class="col">
+                            <input asp-for="RevisionNote" class="form-control form-control-sm"
+                                   placeholder="e.g. Increased flow rate per client request" />
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SECTION A: Process Parameters -->
+            <div class="card mb-3">
+                <div class="form-section-header" data-target="sectionA">
+                    <span><i class="bi bi-wind me-2 text-primary"></i>A — Process Parameters</span>
+                    <i class="bi bi-chevron-down toggle-icon"></i>
+                </div>
+                <div class="collapse show" id="sectionA">
+                    <div class="card-body">
+                        <div class="row g-3">
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="FlowRateCFM" class="form-label">Flow Rate (CFM) <span class="text-danger">*</span></label>
+                                <div class="input-group">
+                                    <input asp-for="FlowRateCFM" class="form-control" type="number" step="0.01" />
+                                    <span class="input-group-text">CFM</span>
+                                </div>
+                                <span asp-validation-for="FlowRateCFM" class="text-danger"></span>
+                                <div class="form-text" id="flowM3hr"></div>
+                            </div>
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="InletLineSizeIn" class="form-label">Inlet Line Size (Ø) <span class="text-danger">*</span></label>
+                                <div class="input-group">
+                                    <input asp-for="InletLineSizeIn" class="form-control" type="number" step="0.125" />
+                                    <span class="input-group-text">in</span>
+                                </div>
+                                <span asp-validation-for="InletLineSizeIn" class="text-danger"></span>
+                            </div>
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="GasType" class="form-label">Gas Type</label>
+                                <select asp-for="GasType" class="form-select">
+                                    <option value="Air">Air</option>
+                                    <option value="N2">Nitrogen (N₂)</option>
+                                    <option value="FlueGas">Flue Gas / CO₂</option>
+                                </select>
+                            </div>
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="OperatingTempC" class="form-label">Temperature</label>
+                                <div class="input-group">
+                                    <input asp-for="OperatingTempC" class="form-control" type="number" step="1" />
+                                    <span class="input-group-text">°C</span>
+                                </div>
+                            </div>
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="OperatingPressKPa" class="form-label">Pressure</label>
+                                <div class="input-group">
+                                    <input asp-for="OperatingPressKPa" class="form-control" type="number" step="0.001" />
+                                    <span class="input-group-text">kPa</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SECTION B: Particle / Solids -->
+            <div class="card mb-3">
+                <div class="form-section-header" data-target="sectionB">
+                    <span><i class="bi bi-dots-grid me-2 text-warning"></i>B — Particle / Solids Properties</span>
+                    <i class="bi bi-chevron-down toggle-icon"></i>
+                </div>
+                <div class="collapse show" id="sectionB">
+                    <div class="card-body">
+                        <div class="row g-3">
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="ParticleSizeMicron" class="form-label">Avg. Particle Size <span class="text-danger">*</span></label>
+                                <div class="input-group">
+                                    <input asp-for="ParticleSizeMicron" class="form-control" type="number" step="0.1" />
+                                    <span class="input-group-text">µm</span>
+                                </div>
+                                <span asp-validation-for="ParticleSizeMicron" class="text-danger"></span>
+                            </div>
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="ParticleSizeD10" class="form-label">D10 (µm)</label>
+                                <div class="input-group">
+                                    <input asp-for="ParticleSizeD10" class="form-control" type="number" step="0.1" />
+                                    <span class="input-group-text">µm</span>
+                                </div>
+                            </div>
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="ParticleSizeD50" class="form-label">D50 (µm)</label>
+                                <div class="input-group">
+                                    <input asp-for="ParticleSizeD50" class="form-control" type="number" step="0.1" />
+                                    <span class="input-group-text">µm</span>
+                                </div>
+                            </div>
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="ParticleSizeD90" class="form-label">D90 (µm)</label>
+                                <div class="input-group">
+                                    <input asp-for="ParticleSizeD90" class="form-control" type="number" step="0.1" />
+                                    <span class="input-group-text">µm</span>
+                                </div>
+                            </div>
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="ParticleDensityKgm3" class="form-label">Particle Density <span class="text-danger">*</span></label>
+                                <div class="input-group">
+                                    <input asp-for="ParticleDensityKgm3" class="form-control" type="number" step="1" />
+                                    <span class="input-group-text">kg/m³</span>
+                                </div>
+                                <span asp-validation-for="ParticleDensityKgm3" class="text-danger"></span>
+                            </div>
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="BulkDensityKgm3" class="form-label">Bulk Density</label>
+                                <div class="input-group">
+                                    <input asp-for="BulkDensityKgm3" class="form-control" type="number" step="1" />
+                                    <span class="input-group-text">kg/m³</span>
+                                </div>
+                            </div>
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="ShapeFactor" class="form-label">Shape Factor</label>
+                                <div class="input-group">
+                                    <input asp-for="ShapeFactor" class="form-control" type="number" step="0.01" min="0.1" max="1" />
+                                    <span class="input-group-text">—</span>
+                                </div>
+                                <div class="form-text">1.0 = perfect sphere</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SECTION C: Design Parameters -->
+            <div class="card mb-3">
+                <div class="form-section-header" data-target="sectionC">
+                    <span><i class="bi bi-gear me-2 text-info"></i>C — Design Parameters</span>
+                    <i class="bi bi-chevron-down toggle-icon"></i>
+                </div>
+                <div class="collapse show" id="sectionC">
+                    <div class="card-body">
+                        <div class="row g-3">
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="EffectiveTurns" class="form-label">Effective Turns (Nt) <span class="text-danger">*</span></label>
+                                <input asp-for="EffectiveTurns" class="form-control" type="number" step="0.5" />
+                                <span asp-validation-for="EffectiveTurns" class="text-danger"></span>
+                            </div>
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="NumberOfCyclones" class="form-label">No. of Cyclones (parallel)</label>
+                                <input asp-for="NumberOfCyclones" class="form-control" type="number" min="1" max="100" />
+                            </div>
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="SafetyFactor" class="form-label">Safety Factor</label>
+                                <input asp-for="SafetyFactor" class="form-control" type="number" step="0.05" />
+                            </div>
+                            <div class="col-sm-6 col-md-4">
+                                <label asp-for="InletShape" class="form-label">Inlet Shape</label>
+                                <select asp-for="InletShape" class="form-select">
+                                    <option value="Rectangular">Rectangular</option>
+                                    <option value="Circular">Circular</option>
+                                </select>
+                            </div>
+                            <div class="col-sm-8">
+                                <label class="form-label">Gas Viscosity</label>
+                                <div class="d-flex gap-2 align-items-center mb-2">
+                                    <div class="form-check mb-0">
+                                        <input class="form-check-input" type="checkbox" asp-for="ViscosityAutoCalc"
+                                               id="autoVisc" onchange="toggleViscosity(this.checked)" />
+                                        <label class="form-check-label" for="autoVisc" style="font-size:13px;">
+                                            Auto-calculate (Sutherland equation)
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="input-group" id="viscInput" style="@(Model.ViscosityAutoCalc ? "display:none;" : "")">
+                                    <input asp-for="GasViscosityKgms" class="form-control" type="number"
+                                           step="0.0000000001" placeholder="e.g. 0.0000184600" />
+                                    <span class="input-group-text">kg/m·s</span>
+                                </div>
+                                <div class="form-text" id="viscAutoNote" style="@(Model.ViscosityAutoCalc ? "" : "display:none;")">
+                                    Viscosity will be computed from temperature using Sutherland's equation.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Calculate Button -->
+            <div class="d-flex gap-3 align-items-center">
+                <button type="submit" class="btn btn-primary btn-lg px-5" id="btnCalc">
+                    <i class="bi bi-calculator-fill me-2"></i>Calculate
+                </button>
+                <a href="@Url.Action("Detail", new { id = Model.DesignId })" class="btn btn-outline-secondary">
+                    Cancel
+                </a>
+            </div>
+
+        </div>
+
+        <!-- ── Right: Quick Reference ─────────────────────────────── -->
+        <div class="col-xl-4">
+            <div class="card mb-3">
+                <div class="card-header">
+                    <h5 class="card-title"><i class="bi bi-info-circle me-2 text-info"></i>Quick Reference</h5>
+                </div>
+                <div class="card-body p-0">
+                    <table class="table table-borderless mb-0" style="font-size:12.5px;">
+                        <tr>
+                            <td class="ps-3 text-muted" style="width:55%">Cyclone Type</td>
+                            <td class="pe-3 fw-600">@Model.CycloneTypeName</td>
+                        </tr>
+                        <tr>
+                            <td class="ps-3 text-muted">Design Tag</td>
+                            <td class="pe-3 fw-600 text-mono">@Model.TagNumber</td>
+                        </tr>
+                        <tr>
+                            <td class="ps-3 text-muted">Revision</td>
+                            <td class="pe-3"><span class="badge bg-secondary">Rev @Model.RevisionNumber</span></td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title"><i class="bi bi-book me-2 text-secondary"></i>Formulae Used</h5>
+                </div>
+                <div class="card-body" style="font-size:12px; color:var(--text-muted);">
+                    <p class="mb-2"><strong>Barrel Dia:</strong> Dc = √(A_inlet / (h_ratio × w_ratio))</p>
+                    <p class="mb-2"><strong>Cut Dia (Lapple):</strong> Dpc = √(9μB / πNtViρp)</p>
+                    <p class="mb-2"><strong>Efficiency:</strong> η = 1 / (1 + (Dpc/Dp)²)</p>
+                    <p class="mb-2"><strong>Pressure Drop:</strong> ΔP = Nh × ½ρgVi²</p>
+                    <p class="mb-0"><strong>Viscosity:</strong> Sutherland's equation</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</form>
+
+@section Scripts {
+    <script>
+        function toggleViscosity(auto) {
+            document.getElementById('viscInput').style.display    = auto ? 'none' : '';
+            document.getElementById('viscAutoNote').style.display = auto ? '' : 'none';
+        }
+        // Live CFM → m³/hr conversion hint
+        document.getElementById('FlowRateCFM')?.addEventListener('input', function() {
+            var m3hr = (parseFloat(this.value) * 1.69901).toFixed(2);
+            document.getElementById('flowM3hr').textContent = isNaN(m3hr) ? '' : '≈ ' + m3hr + ' m³/hr';
+        });
+        // Collapsible sections
+        document.querySelectorAll('.form-section-header').forEach(function(hdr) {
+            hdr.addEventListener('click', function() {
+                var target = document.getElementById(this.dataset.target);
+                var bsCollapse = new bootstrap.Collapse(target, { toggle: true });
+                this.querySelector('.toggle-icon').style.transform =
+                    target.classList.contains('show') ? 'rotate(-90deg)' : 'rotate(0deg)';
+            });
+        });
+        document.getElementById('calcForm').addEventListener('submit', function() {
+            setButtonLoading(document.getElementById('btnCalc'), true);
+        });
+        // Trigger once to show hint
+        document.getElementById('FlowRateCFM')?.dispatchEvent(new Event('input'));
+    </script>
+}

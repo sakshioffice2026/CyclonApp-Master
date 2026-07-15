@@ -1,0 +1,347 @@
+﻿@model CyclonApp.Model.ViewModel.DesignExportViewModel
+@{
+    ViewData["Title"] = "Export / Reports";
+    Layout = "_Layout";
+}
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title">
+            <i class="bi bi-file-earmark-arrow-down me-2 text-primary"></i>Export / Reports
+        </h1>
+        <p class="page-subtitle">
+            @if (Model != null && Model.Id != 0)
+            {
+                <text>Export for: <strong class="text-mono">@Model.TagNumber</strong> &mdash; @Model.CycloneType</text>
+            }
+            else
+            {
+                <text>Generate PDF and Excel reports for any revision</text>
+            }
+        </p>
+    </div>
+    <a href="@Url.Action("History")" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-clock-history me-1"></i>Export History
+    </a>
+</div>
+
+@if (Model != null && Model.Revisions != null && Model.Revisions.Any())
+{
+    <!-- Per-design export: revision picker -->
+    <div class="row g-4">
+        <div class="col-lg-7">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title">
+                        <i class="bi bi-list-check me-2 text-primary"></i>Select Revision to Export
+                    </h5>
+                </div>
+
+                @if (!Model.Revisions.Any(r => r.HasResults))
+                {
+                    <div class="card-body empty-state">
+                        <i class="bi bi-calculator"></i>
+                        <h5>No calculated revisions</h5>
+                        <p class="text-muted" style="font-size:13px">Run a calculation first to enable export.</p>
+                        <a href="@Url.Action("Calculate","Design", new { id = Model.Id })"
+                           class="btn btn-primary btn-sm mt-1">
+                            <i class="bi bi-calculator me-1"></i>Calculate Now
+                        </a>
+                    </div>
+                }
+                else
+                {
+                    <div class="table-responsive">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>Revision</th>
+                                    <th>Note</th>
+                                    <th>Date</th>
+                                    <th>Export PDF</th>
+                                    <th>Export Excel</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var rev in Model.Revisions.OrderByDescending(r => r.RevisionNumber))
+                                {
+                                    <tr>
+                                        <td>
+                                            <span class="badge @(rev.RevisionNumber == Model.CurrentRevision ? "bg-primary" : "bg-secondary")">
+                                                Rev @rev.RevisionNumber
+                                            </span>
+                                        </td>
+                                        <td style="font-size:12.5px;color:var(--text-muted)">
+                                            @(rev.RevisionNote ?? "—")
+                                        </td>
+                                        <td style="font-size:12.5px;color:var(--text-muted)">
+                                            @(rev.CreatedAt != default ? rev.CreatedAt.ToString("dd MMM yyyy") : "Not calculated")
+                                        </td>
+                                        <td>
+                                            @if (rev.HasResults)
+                                            {
+                                                <a href="@Url.Action("Pdf","Export", new { revisionId = rev.Id })"
+                                                   class="btn btn-danger btn-sm" target="_blank"
+                                                   title="Opens in browser — Ctrl+P to save as PDF">
+                                                    <i class="bi bi-file-pdf me-1"></i>PDF
+                                                </a>
+                                            }
+                                            else
+                                            {
+                                                <span class="text-muted" style="font-size:12px">—</span>
+                                            }
+                                        </td>
+                                        <td>
+                                            @if (rev.HasResults)
+                                            {
+                                                <a href="@Url.Action("Excel","Export", new { revisionId = rev.Id })"
+                                                   class="btn btn-success btn-sm">
+                                                    <i class="bi bi-file-excel me-1"></i>Excel
+                                                </a>
+                                            }
+                                            else
+                                            {
+                                                <span class="text-muted" style="font-size:12px">—</span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </div>
+        </div>
+
+        <!-- Format guide -->
+        <div class="col-lg-5">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h5 class="card-title"><i class="bi bi-info-circle me-2 text-primary"></i>Export Formats</h5>
+                </div>
+                <div class="card-body">
+                    <div class="mb-4">
+                        <div class="d-flex align-items-center gap-2 mb-2">
+                            <i class="bi bi-file-earmark-pdf fs-3" style="color:#dc2626"></i>
+                            <span style="font-weight:700">PDF Report</span>
+                        </div>
+                        <p style="font-size:13px;color:var(--text-muted)">
+                            Professional report with project header, KPI summary, full dimensions table,
+                            calculated results, and input summary. Opens in browser — use <kbd>Ctrl+P</kbd>
+                            &rarr; Save as PDF.
+                        </p>
+                        <div class="d-flex flex-wrap gap-1">
+                            <span class="ef-chip">Project header</span>
+                            <span class="ef-chip">KPI block</span>
+                            <span class="ef-chip">Dimensions</span>
+                            <span class="ef-chip">Results</span>
+                            <span class="ef-chip">Input summary</span>
+                        </div>
+                    </div>
+                    <hr>
+                    <div>
+                        <div class="d-flex align-items-center gap-2 mb-2">
+                            <i class="bi bi-file-earmark-excel fs-3" style="color:#16a34a"></i>
+                            <span style="font-weight:700">Excel Workbook (.xlsx)</span>
+                        </div>
+                        <p style="font-size:13px;color:var(--text-muted)">
+                            Multi-sheet workbook with Report Cover, Dimensions, Calculated Results,
+                            Design Inputs, and Grade Efficiency Curve — all with conditional formatting.
+                        </p>
+                        <div class="d-flex flex-wrap gap-1">
+                            <span class="ef-chip">5 worksheets</span>
+                            <span class="ef-chip">Formatted tables</span>
+                            <span class="ef-chip">Efficiency curve</span>
+                            <span class="ef-chip">All units</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+else
+{
+    <!-- General landing: format cards + recent exports -->
+    <div class="row g-4 mb-4">
+        <div class="col-md-6">
+            <div class="export-format-card">
+                <div class="ef-icon ef-icon-pdf"><i class="bi bi-file-earmark-pdf"></i></div>
+                <div class="ef-title">PDF Report</div>
+                <div class="ef-desc">
+                    Professional report with project header, KPI summary, full dimensions table,
+                    calculated results, and input summary. Suitable for client submission.
+                </div>
+                <div class="ef-features">
+                    <span class="ef-chip">Project header</span>
+                    <span class="ef-chip">KPI block</span>
+                    <span class="ef-chip">Dimensions</span>
+                    <span class="ef-chip">Results</span>
+                    <span class="ef-chip">Input summary</span>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="export-format-card">
+                <div class="ef-icon ef-icon-excel"><i class="bi bi-file-earmark-excel"></i></div>
+                <div class="ef-title">Excel Workbook (.xlsx)</div>
+                <div class="ef-desc">
+                    Multi-sheet workbook: Report Cover, Dimensions, Calculated Results,
+                    Design Inputs, and Grade Efficiency Curve with conditional formatting.
+                </div>
+                <div class="ef-features">
+                    <span class="ef-chip">5 worksheets</span>
+                    <span class="ef-chip">Formatted tables</span>
+                    <span class="ef-chip">Efficiency curve</span>
+                    <span class="ef-chip">All units</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h5 class="card-title">
+                <i class="bi bi-clock-history me-2 text-primary"></i>Recent Exports
+            </h5>
+            <a href="@Url.Action("History")" class="btn btn-outline-secondary btn-sm">View All</a>
+        </div>
+
+        @if (Model?.ExportLogs == null || !Model.ExportLogs.Any())
+        {
+            <div class="card-body empty-state" style="padding:40px">
+                <i class="bi bi-file-earmark-arrow-down"></i>
+                <h5>No exports yet</h5>
+                <p class="text-muted" style="font-size:13px">
+                    Open a project, open a design, then use the PDF or Excel buttons on any results page.
+                </p>
+                <a href="@Url.Action("Index","Project")" class="btn btn-primary btn-sm mt-1">
+                    <i class="bi bi-folder2-open me-1"></i>Go to Projects
+                </a>
+            </div>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Tag / Design</th>
+                            <th>Project</th>
+                            <th>Rev.</th>
+                            <th>Format</th>
+                            <th>Exported By</th>
+                            <th>Date</th>
+                            <th>Re-export</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var log in Model.ExportLogs.Take(20))
+                        {
+                            <tr>
+                                <td class="text-mono" style="font-weight:600;color:var(--primary)">
+                                    @(log.DesignRevision?.CycloneDesign?.TagNumber ?? "—")
+                                </td>
+                                <td style="font-size:13px">
+                                    @(log.DesignRevision?.CycloneDesign?.Project?.Name ?? "—")
+                                </td>
+                                <td>
+                                    <span class="badge bg-secondary">Rev @(log.DesignRevision?.RevisionNumber)</span>
+                                </td>
+                                <td>
+                                    @if (log.ExportType == CyclonApp.Database.ExportType.PDF)
+                                    {
+                                        <span class="badge bg-danger">PDF</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="badge bg-success">Excel</span>
+                                    }
+                                </td>
+                                <td style="font-size:12.5px;color:var(--text-muted)">
+                                    @(log.ExportedBy?.DisplayName ?? "—")
+                                </td>
+                                <td style="font-size:12.5px;color:var(--text-muted)">
+                                    @log.ExportedAt.ToString("dd MMM yyyy HH:mm")
+                                </td>
+                                <td>
+                                    <div class="d-flex gap-1">
+                                        <a href="@Url.Action("Pdf","Export", new { revisionId = log.DesignRevisionId })"
+                                           class="btn btn-icon btn-outline-danger btn-sm"
+                                           title="PDF — opens in browser" target="_blank">
+                                            <i class="bi bi-file-pdf"></i>
+                                        </a>
+                                        <a href="@Url.Action("Excel","Export", new { revisionId = log.DesignRevisionId })"
+                                           class="btn btn-icon btn-outline-success btn-sm" title="Excel">
+                                            <i class="bi bi-file-excel"></i>
+                                        </a>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+}
+
+@section Styles {
+    <style>
+        .export-format-card {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            height: 100%;
+            background: var(--surface);
+            box-shadow: var(--shadow);
+            transition: box-shadow .18s;
+        }
+
+            .export-format-card:hover {
+                box-shadow: var(--shadow-md);
+            }
+
+        .ef-icon {
+            font-size: 40px;
+            margin-bottom: 12px;
+        }
+
+        .ef-icon-pdf {
+            color: #dc2626;
+        }
+
+        .ef-icon-excel {
+            color: #16a34a;
+        }
+
+        .ef-title {
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 10px;
+            color: var(--text);
+        }
+
+        .ef-desc {
+            font-size: 13px;
+            color: var(--text-muted);
+            line-height: 1.6;
+            margin-bottom: 14px;
+        }
+
+        .ef-features {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .ef-chip {
+            font-size: 11.5px;
+            font-weight: 500;
+            padding: 3px 10px;
+            border-radius: 20px;
+            background: var(--primary-light);
+            color: var(--primary-dark);
+        }
+    </style>
+}

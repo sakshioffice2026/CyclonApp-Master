@@ -1,0 +1,361 @@
+﻿@using CyclonApp.Database
+@model CyclonApp.Model.ViewModel.ProjectIndexViewModel;
+
+@{
+    ViewData["Title"] = "Projects";
+    Layout = "_Layout";
+}
+
+<!-- ── Stat Cards ───────────────────────────────────────────────────────── -->
+<div class="row g-3 mb-4">
+    <div class="col-6 col-xl-3">
+        <div class="stat-card">
+            <div class="stat-icon blue"><i class="bi bi-folder2"></i></div>
+            <div>
+                <div class="stat-value">@Model.TotalProjects</div>
+                <div class="stat-label">Total Projects</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-xl-3">
+        <div class="stat-card">
+            <div class="stat-icon green"><i class="bi bi-play-circle"></i></div>
+            <div>
+                <div class="stat-value">@Model.ActiveProjects</div>
+                <div class="stat-label">Active</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-xl-3">
+        <div class="stat-card">
+            <div class="stat-icon amber"><i class="bi bi-hourglass-split"></i></div>
+            <div>
+                <div class="stat-value">@Model.DraftProjects</div>
+                <div class="stat-label">In Draft</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-xl-3">
+        <div class="stat-card">
+            <div class="stat-icon blue"><i class="bi bi-calculator"></i></div>
+            <div>
+                <div class="stat-value">@Model.TotalDesigns</div>
+                <div class="stat-label">Total Designs</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ── Page Header ──────────────────────────────────────────────────────── -->
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Projects</h1>
+        <p class="page-subtitle">Manage cyclone design projects for your organisation</p>
+    </div>
+    @if (User.IsInRole("Engineer") || User.IsInRole("ClientAdmin") || User.IsInRole("SuperAdmin"))
+    {
+        <a href="@Url.Action("Create")" class="btn btn-primary">
+            <i class="bi bi-plus-lg me-1"></i>New Project
+        </a>
+    }
+</div>
+
+<!-- ── Filter Bar ────────────────────────────────────────────────────────── -->
+<div class="card mb-3">
+    <div class="card-body py-3">
+        <form method="get" asp-action="Index" class="d-flex flex-wrap gap-2 align-items-end">
+            <div style="min-width:220px; flex:1;">
+                <label class="form-label mb-1" style="font-size:12px;">Search</label>
+                <div class="input-group input-group-sm">
+                    <span class="input-group-text"><i class="bi bi-search"></i></span>
+                    <input type="text" name="search" value="@Model.SearchTerm"
+                           class="form-control" placeholder="Project name, number or client..." />
+                </div>
+            </div>
+            <div style="min-width:160px;">
+                <label class="form-label mb-1" style="font-size:12px;">Status</label>
+                <select name="status" class="form-select form-select-sm" onchange="this.form.submit()">
+                    <option value="">All Statuses</option>
+                    @foreach (var s in Enum.GetValues<ProjectStatus>())
+                    {
+                        <option value="@s" selected="@(Model.FilterStatus == s.ToString())">@s</option>
+                    }
+                </select>
+            </div>
+            <div class="d-flex gap-2">
+                <button type="submit" class="btn btn-primary btn-sm">
+                    <i class="bi bi-funnel me-1"></i>Filter
+                </button>
+                @if (!string.IsNullOrEmpty(Model.SearchTerm) || !string.IsNullOrEmpty(Model.FilterStatus))
+                {
+                    <a href="@Url.Action("Index")" class="btn btn-outline-secondary btn-sm">
+                        <i class="bi bi-x me-1"></i>Clear
+                    </a>
+                }
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- ── Projects Table ────────────────────────────────────────────────────── -->
+<div class="card">
+    <div class="card-header">
+        <h5 class="card-title">
+            <i class="bi bi-table me-2 text-primary"></i>
+            @Model.Projects.Count project(s)
+            @if (!string.IsNullOrEmpty(Model.SearchTerm))
+            {
+                <small class="text-muted fw-normal">matching "@Model.SearchTerm"</small>
+            }
+        </h5>
+        <div class="d-flex gap-2">
+            <button class="btn btn-outline-secondary btn-sm" id="btnToggleDense" title="Toggle density">
+                <i class="bi bi-layout-three-columns"></i>
+            </button>
+        </div>
+    </div>
+
+    @if (!Model.Projects.Any())
+    {
+        <div class="empty-state">
+            <i class="bi bi-folder2-open"></i>
+            <h5>No projects found</h5>
+            <p class="text-muted" style="font-size:13px;">
+                @if (!string.IsNullOrEmpty(Model.SearchTerm) || !string.IsNullOrEmpty(Model.FilterStatus))
+                {
+                    <text>No projects match your filter. <a href="@Url.Action("Index")">Clear filters</a></text>
+                }
+                else
+                {
+                    <text>Get started by creating your first project.</text>
+                }
+            </p>
+            @if (string.IsNullOrEmpty(Model.SearchTerm) && User.IsInRole("Engineer"))
+            {
+                <a href="@Url.Action("Create")" class="btn btn-primary btn-sm mt-2">
+                    <i class="bi bi-plus-lg me-1"></i>Create First Project
+                </a>
+            }
+        </div>
+    }
+    else
+    {
+        <div class="table-responsive">
+            <table class="table" id="projectsTable">
+                <thead>
+                    <tr>
+                        <th style="width:120px">Proj. No.</th>
+                        <th>Project Name</th>
+                        <th>Client</th>
+                        <th>Location</th>
+                        <th style="width:100px">Status</th>
+                        <th style="width:80px; text-align:center;">Designs</th>
+                        <th style="width:130px">Last Updated</th>
+                        <th style="width:130px">Created By</th>
+                        <th style="width:110px">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var p in Model.Projects)
+                    {
+                        <tr>
+                            <td>
+                                <a href="@Url.Action("Detail", new { id = p.Id })"
+                                   class="text-mono fw-600"
+                                   style="color:var(--primary); text-decoration:none; font-size:13px;">
+                                    @p.ProjectNumber
+                                </a>
+                            </td>
+                            <td>
+                                <a href="@Url.Action("Detail", new { id = p.Id })"
+                                   style="color:var(--text); text-decoration:none; font-weight:500;">
+                                    @p.Name
+                                </a>
+                            </td>
+                            <td class="text-muted">@(p.ClientName ?? "—")</td>
+                            <td class="text-muted">@(p.Location ?? "—")</td>
+                            <td>
+                                <span class="badge badge-@p.Status.ToString().ToLower()">@p.Status</span>
+                            </td>
+                            <td style="text-align:center;">
+                                @if (p.DesignCount > 0)
+                                {
+                                    <span class="badge bg-primary rounded-pill">@p.DesignCount</span>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">—</span>
+                                }
+                            </td>
+                            <td style="font-size:12.5px; color:var(--text-muted);">
+                                @((p.UpdatedAt ?? p.CreatedAt).ToString("dd MMM yyyy"))
+                            </td>
+                            <td style="font-size:12.5px; color:var(--text-muted);">
+                                @p.CreatedBy
+                            </td>
+                            <td>
+                                <div class="d-flex gap-1">
+                                    <a href="@Url.Action("Detail", new { id = p.Id })"
+                                       class="btn btn-icon btn-outline-primary btn-sm"
+                                       title="View Detail">
+                                        <i class="bi bi-eye"></i>
+                                    </a>
+                                    @if (User.IsInRole("Engineer") || User.IsInRole("ClientAdmin") || User.IsInRole("SuperAdmin"))
+                                    {
+                                        if (p.Status != ProjectStatus.Archived)
+                                        {
+                                            <a href="@Url.Action("Edit", new { id = p.Id })"
+                                               class="btn btn-icon btn-outline-secondary btn-sm"
+                                               title="Edit">
+                                                <i class="bi bi-pencil"></i>
+                                            </a>
+                                        }
+                                    }
+                                    <div class="dropdown">
+                                        <button class="btn btn-icon btn-outline-secondary btn-sm dropdown-toggle no-caret"
+                                                data-bs-toggle="dropdown" title="More actions">
+                                            <i class="bi bi-three-dots-vertical"></i>
+                                        </button>
+                                        <ul class="dropdown-menu dropdown-menu-end" style="font-size:13px; min-width:180px;">
+                                            <li>
+                                                <a class="dropdown-item" href="@Url.Action("Detail", new { id = p.Id })">
+                                                    <i class="bi bi-folder2-open me-2"></i>Open Project
+                                                </a>
+                                            </li>
+                                            <li>
+                                                <a class="dropdown-item" href="@Url.Action("Create","Design", new { projectId = p.Id })">
+                                                    <i class="bi bi-plus-circle me-2"></i>Add Design
+                                                </a>
+                                            </li>
+                                            <li><hr class="dropdown-divider" /></li>
+
+                                            @if (p.Status == ProjectStatus.Draft)
+                                            {
+                                                <li>
+                                                    <form asp-action="ChangeStatus" method="post" class="d-inline">
+                                                        @Html.AntiForgeryToken()
+                                                        <input type="hidden" name="id" value="@p.Id" />
+                                                        <input type="hidden" name="newStatus" value="Active" />
+                                                        <button type="submit" class="dropdown-item text-success">
+                                                            <i class="bi bi-play-circle me-2"></i>Mark Active
+                                                        </button>
+                                                    </form>
+                                                </li>
+                                            }
+                                            @if (p.Status == ProjectStatus.Active)
+                                            {
+                                                <li>
+                                                    <form asp-action="ChangeStatus" method="post" class="d-inline">
+                                                        @Html.AntiForgeryToken()
+                                                        <input type="hidden" name="id" value="@p.Id" />
+                                                        <input type="hidden" name="newStatus" value="Completed" />
+                                                        <button type="submit" class="dropdown-item text-info">
+                                                            <i class="bi bi-check-circle me-2"></i>Mark Completed
+                                                        </button>
+                                                    </form>
+                                                </li>
+                                            }
+                                            @if (p.Status != ProjectStatus.Archived)
+                                            {
+                                                <li>
+                                                    <form asp-action="ChangeStatus" method="post" class="d-inline">
+                                                        @Html.AntiForgeryToken()
+                                                        <input type="hidden" name="id" value="@p.Id" />
+                                                        <input type="hidden" name="newStatus" value="Archived" />
+                                                        <button type="submit" class="dropdown-item text-warning"
+                                                                data-confirm="Archive this project? It will become read-only.">
+                                                            <i class="bi bi-archive me-2"></i>Archive
+                                                        </button>
+                                                    </form>
+                                                </li>
+                                            }
+                                            else
+                                            {
+                                                <li>
+                                                    <form asp-action="ChangeStatus" method="post" class="d-inline">
+                                                        @Html.AntiForgeryToken()
+                                                        <input type="hidden" name="id" value="@p.Id" />
+                                                        <input type="hidden" name="newStatus" value="Active" />
+                                                        <button type="submit" class="dropdown-item text-success">
+                                                            <i class="bi bi-arrow-counterclockwise me-2"></i>Restore
+                                                        </button>
+                                                    </form>
+                                                </li>
+                                            }
+
+                                            @if (User.IsInRole("ClientAdmin") || User.IsInRole("SuperAdmin"))
+                                            {
+                                                <li><hr class="dropdown-divider" /></li>
+                                                <li>
+                                                    <form asp-action="Delete" method="post" class="d-inline">
+                                                        @Html.AntiForgeryToken()
+                                                        <input type="hidden" name="id" value="@p.Id" />
+                                                        <button type="submit" class="dropdown-item text-danger"
+                                                                data-confirm="Permanently delete '@p.Name'? This cannot be undone.">
+                                                            <i class="bi bi-trash me-2"></i>Delete
+                                                        </button>
+                                                    </form>
+                                                </li>
+                                            }
+                                        </ul>
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
+@section Styles {
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.7/css/dataTables.bootstrap5.min.css" />
+    <style>
+        .dropdown-toggle.no-caret::after {
+            display: none;
+        }
+
+        .fw-600 {
+            font-weight: 600;
+        }
+
+        .dataTables_wrapper .dataTables_filter input {
+            font-size: 13px;
+        }
+
+        .dataTables_wrapper .dataTables_length select {
+            font-size: 13px;
+        }
+    </style>
+}
+
+@section Scripts {
+    <script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.7/js/dataTables.bootstrap5.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script>
+        $(document).ready(function () {
+            var table = $('#projectsTable').DataTable({
+                paging:   true,
+                pageLength: 25,
+                searching: false,   // we use our own search form
+                ordering: true,
+                order:    [[6, 'desc']],
+                columnDefs: [
+                    { orderable: false, targets: [8] }
+                ],
+                language: {
+                    info:      "Showing _START_ to _END_ of _TOTAL_ projects",
+                    paginate:  { previous: "←", next: "→" },
+                    lengthMenu: "Show _MENU_ per page"
+                }
+            });
+
+            // Density toggle
+            $('#btnToggleDense').on('click', function () {
+                $('#projectsTable').toggleClass('table-sm');
+            });
+        });
+    </script>
+}

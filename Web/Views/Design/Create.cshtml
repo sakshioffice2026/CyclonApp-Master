@@ -1,0 +1,159 @@
+﻿@model DesignCreateViewModel;
+@{
+    ViewData["Title"] = "New Cyclone Design";
+    Layout = "_Layout";
+}
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title"><i class="bi bi-wind me-2 text-primary"></i>New Cyclone Design</h1>
+        <p class="page-subtitle">Project: <strong>@Model.ProjectName</strong></p>
+    </div>
+    <a href="@Url.Action("Detail","Project", new { id = Model.ProjectId })" class="btn btn-outline-secondary">
+        <i class="bi bi-arrow-left me-1"></i>Back to Project
+    </a>
+</div>
+
+<div class="row g-4">
+    <div class="col-lg-7">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title"><i class="bi bi-info-circle me-2 text-primary"></i>Design Identity</h5>
+            </div>
+            <div class="card-body">
+                <form asp-action="Create" method="post">
+                    @Html.AntiForgeryToken()
+                    <input type="hidden" asp-for="ProjectId" />
+
+                    @if (!ViewData.ModelState.IsValid)
+                    {
+                        <div class="alert alert-danger py-2 px-3 mb-3" style="font-size:13px;border-radius:8px;">
+                            <div asp-validation-summary="All" class="mb-0"></div>
+                        </div>
+                    }
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-sm-5">
+                            <label asp-for="TagNumber" class="form-label">Tag Number <span class="text-danger">*</span></label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-tag"></i></span>
+                                <input asp-for="TagNumber" class="form-control text-mono" placeholder="CYC-101" style="font-weight:600;" />
+                            </div>
+                            <span asp-validation-for="TagNumber" class="text-danger"></span>
+                        </div>
+                        <div class="col-sm-7">
+                            <label asp-for="Name" class="form-label">Design Name / Description</label>
+                            <input asp-for="Name" class="form-control" placeholder="e.g. Primary Dust Collector" />
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label">Cyclone Type <span class="text-danger">*</span></label>
+                        <div class="cyclone-type-grid" id="cycloneTypeGrid">
+                            @foreach (var t in Model.CycloneTypes)
+                            {
+                                <div class="ct-card" data-id="@t.Id" onclick="selectType(@t.Id, this)">
+                                    <div class="ct-icon"><i class="bi bi-hurricane"></i></div>
+                                    <div class="ct-code">@t.Code</div>
+                                    <div class="ct-name">@t.Name</div>
+                                </div>
+                            }
+                        </div>
+                        <input type="hidden" asp-for="CycloneTypeId" id="CycloneTypeId" />
+                        <span asp-validation-for="CycloneTypeId" class="text-danger"></span>
+                    </div>
+
+                    <div class="mb-4">
+                        <label asp-for="Notes" class="form-label">Notes</label>
+                        <textarea asp-for="Notes" class="form-control" rows="3" placeholder="Additional notes..."></textarea>
+                    </div>
+
+                    <div class="d-flex gap-2">
+                        <button type="submit" class="btn btn-primary px-4">
+                            <i class="bi bi-arrow-right-circle me-2"></i>Create &amp; Enter Parameters
+                        </button>
+                        <a href="@Url.Action("Detail","Project", new { id = Model.ProjectId })" class="btn btn-outline-secondary">Cancel</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-5">
+        <div class="card" id="typeInfoCard" style="display:none;">
+            <div class="card-header">
+                <h5 class="card-title" id="typeInfoTitle"><i class="bi bi-hurricane me-2 text-primary"></i>Type Info</h5>
+            </div>
+            <div class="card-body" id="typeInfoBody" style="font-size:13px;color:var(--text-muted);"></div>
+        </div>
+    </div>
+</div>
+
+@section Styles {
+    <style>
+        /* .cyclone-type-grid { */
+        /*     display: grid; */
+        /*     grid-template-columns: repeat(auto-fill,minmax(140px,1fr)); */
+        /*     gap: 10px; */
+        /*     margin-top: 6px; */
+        /* } */
+
+        /* .ct-card { */
+        /*     border: 2px solid var(--border); */
+        /*     border-radius: 10px; */
+        /*     padding: 14px 10px; */
+        /*     cursor: pointer; */
+        /*     transition: all .18s; */
+        /*     text-align: center; */
+        /* } */
+
+            .ct-card:hover, .ct-card.selected {
+                border-color: var(--primary);
+                background: var(--primary-light);
+            }
+
+        /* .ct-icon { */
+        /*     font-size: 26px; */
+        /*     color: var(--primary); */
+        /*     margin-bottom: 6px; */
+        /* } */
+
+        .ct-code {
+            font-size: 10.5px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .06em;
+            color: var(--text-muted);
+        }
+
+        .ct-name {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text);
+            line-height: 1.3;
+            margin-top: 3px;
+        }
+    </style>
+}
+
+@section Scripts {
+    <script>
+        var typeData = @Html.Raw(System.Text.Json.JsonSerializer.Serialize(Model.CycloneTypes));
+        function selectType(id, el) {
+            document.querySelectorAll('.ct-card').forEach(c => c.classList.remove('selected'));
+            el.classList.add('selected');
+            document.getElementById('CycloneTypeId').value = id;
+            var t = typeData.find(x => x.id === id);
+            if (t) {
+                document.getElementById('typeInfoCard').style.display = '';
+                document.getElementById('typeInfoTitle').innerHTML = '<i class="bi bi-hurricane me-2 text-primary"></i>' + t.name;
+                document.getElementById('typeInfoBody').innerHTML =
+                    '<p>' + (t.description||'') + '</p>' +
+                    '<div class="mt-2 p-2" style="background:var(--surface-2);border-radius:7px;font-size:12px;"><strong>Default Turns:</strong> ' + t.defaultEffectiveTurns + '</div>' +
+                    (t.applicationNote ? '<div class="mt-2 p-2" style="background:var(--surface-2);border-radius:7px;font-size:12px;"><i class="bi bi-wrench me-1 text-muted"></i>' + t.applicationNote + '</div>' : '');
+            }
+        }
+        var first = document.querySelector('.ct-card');
+        if (first) selectType(parseInt(first.dataset.id), first);
+    </script>
+}

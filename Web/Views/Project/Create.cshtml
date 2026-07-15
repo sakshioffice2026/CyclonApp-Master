@@ -1,0 +1,241 @@
+﻿@using CyclonApp.Database
+@model CyclonApp.Model.ViewModel.ProjectFormViewModel;
+@{
+    ViewData["Title"] = "New Project";
+    Layout = "_Layout";
+}
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title"><i class="bi bi-folder-plus me-2 text-primary"></i>New Project</h1>
+        <p class="page-subtitle">Create a new cyclone design project</p>
+    </div>
+    <a href="@Url.Action("Index")" class="btn btn-outline-secondary">
+        <i class="bi bi-arrow-left me-1"></i>Back to Projects
+    </a>
+</div>
+
+<div class="row g-4">
+
+    <!-- ── Form ─────────────────────────────────────────────────────────── -->
+    <div class="col-lg-7">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title"><i class="bi bi-info-circle me-2 text-primary"></i>Project Details</h5>
+            </div>
+            <div class="card-body">
+                <form asp-action="Create" method="post" id="projectForm">
+                    @Html.AntiForgeryToken()
+
+                    @if (!ViewData.ModelState.IsValid)
+                    {
+                        <div class="alert alert-danger py-2 px-3 mb-4" style="font-size:13px; border-radius:8px;">
+                            <i class="bi bi-exclamation-circle me-2"></i>
+                            <div asp-validation-summary="All" class="d-inline mb-0"></div>
+                        </div>
+                    }
+
+                    <!-- Row 1: Project Number + Status -->
+                    <div class="row g-3 mb-3">
+                        <div class="col-sm-6">
+                            <label asp-for="ProjectNumber" class="form-label">
+                                Project Number <span class="text-danger">*</span>
+                            </label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-hash"></i></span>
+                                <input asp-for="ProjectNumber" class="form-control text-mono"
+                                       placeholder="PRJ-0001" style="font-weight:600;" />
+                            </div>
+                            <span asp-validation-for="ProjectNumber" class="text-danger"></span>
+                        </div>
+                        <div class="col-sm-6">
+                            <label asp-for="Status" class="form-label">Initial Status</label>
+                            <select asp-for="Status" class="form-select">
+                                <option value="Draft">Draft</option>
+                                <option value="Active">Active</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- Row 2: Project Name -->
+                    <div class="mb-3">
+                        <label asp-for="Name" class="form-label">
+                            Project Name <span class="text-danger">*</span>
+                        </label>
+                        <input asp-for="Name" class="form-control"
+                               placeholder="e.g. Dust Collection System — Plant B" />
+                        <span asp-validation-for="Name" class="text-danger"></span>
+                    </div>
+
+                    <!-- Row 3: Client + Location -->
+                    <div class="row g-3 mb-3">
+                        <div class="col-sm-6">
+                            <label asp-for="ClientName" class="form-label">Client / Company Name</label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-building"></i></span>
+                                <input asp-for="ClientName" class="form-control"
+                                       placeholder="Acme Industries Ltd." />
+                            </div>
+                        </div>
+                        <div class="col-sm-6">
+                            <label asp-for="Location" class="form-label">Site / Location</label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i class="bi bi-geo-alt"></i></span>
+                                <input asp-for="Location" class="form-control"
+                                       placeholder="Pune, Maharashtra" />
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Row 4: Description -->
+                    <div class="mb-4">
+                        <label asp-for="Description" class="form-label">Description</label>
+                        <textarea asp-for="Description" class="form-control" rows="4"
+                                  placeholder="Brief description of the project scope, objectives, or notes..."></textarea>
+                        <div class="form-text">Maximum 1000 characters</div>
+                    </div>
+
+                    <div class="d-flex gap-2">
+                        <button type="submit" class="btn btn-primary px-4" id="btnSubmit">
+                            <i class="bi bi-check2 me-2"></i>Create Project
+                        </button>
+                        <a href="@Url.Action("Index")" class="btn btn-outline-secondary">Cancel</a>
+                    </div>
+
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Tips Panel ────────────────────────────────────────────────────── -->
+    <div class="col-lg-5">
+
+        <div class="card mb-3">
+            <div class="card-header">
+                <h5 class="card-title"><i class="bi bi-lightbulb me-2 text-warning"></i>Project Workflow</h5>
+            </div>
+            <div class="card-body p-0">
+                <div class="workflow-steps">
+                    <div class="workflow-step">
+                        <div class="ws-num">1</div>
+                        <div>
+                            <div class="ws-title">Create Project</div>
+                            <div class="ws-desc">Set project metadata, client, and initial status</div>
+                        </div>
+                    </div>
+                    <div class="workflow-step">
+                        <div class="ws-num">2</div>
+                        <div>
+                            <div class="ws-title">Add Cyclone Designs</div>
+                            <div class="ws-desc">One project can contain multiple design items (by tag)</div>
+                        </div>
+                    </div>
+                    <div class="workflow-step">
+                        <div class="ws-num">3</div>
+                        <div>
+                            <div class="ws-title">Calculate & Revise</div>
+                            <div class="ws-desc">Each design tracks full revision history</div>
+                        </div>
+                    </div>
+                    <div class="workflow-step">
+                        <div class="ws-num">4</div>
+                        <div>
+                            <div class="ws-title">Export Reports</div>
+                            <div class="ws-desc">Generate PDF or Excel for any revision</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title"><i class="bi bi-tag me-2 text-info"></i>Status Guide</h5>
+            </div>
+            <div class="card-body">
+                <div class="d-flex flex-column gap-2" style="font-size:13px;">
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="badge badge-draft" style="min-width:80px; text-align:center;">Draft</span>
+                        <span class="text-muted">Work in progress, not yet submitted</span>
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="badge badge-active" style="min-width:80px; text-align:center;">Active</span>
+                        <span class="text-muted">Actively being worked on</span>
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="badge badge-completed" style="min-width:80px; text-align:center;">Completed</span>
+                        <span class="text-muted">All designs finalised</span>
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="badge badge-archived" style="min-width:80px; text-align:center;">Archived</span>
+                        <span class="text-muted">Read-only, retained for reference</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+@section Styles {
+    <style>
+        /* .workflow-steps { */
+        /*     padding: 8px 0; */
+        /* } */
+
+        .workflow-step {
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+            padding: 14px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+            .workflow-step:last-child {
+                border-bottom: none;
+            }
+
+        /* .ws-num { */
+        /*     width: 26px; */
+        /*     height: 26px; */
+        /*     border-radius: 50%; */
+        /*     background: var(--primary); */
+        /*     color: #fff; */
+        /*     font-size: 12px; */
+        /*     font-weight: 700; */
+        /*     display: flex; */
+        /*     align-items: center; */
+        /*     justify-content: center; */
+        /*     flex-shrink: 0; */
+        /*     margin-top: 1px; */
+        /* } */
+
+        /* .ws-title { */
+        /*     font-size: 13.5px; */
+        /*     font-weight: 600; */
+        /*     color: var(--text); */
+        /* } */
+
+        .ws-desc {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+    </style>
+}
+
+@section Scripts {
+    <script>
+        document.getElementById('projectForm').addEventListener('submit', function () {
+            setButtonLoading(document.getElementById('btnSubmit'), true);
+        });
+        // Character counter for description
+        var desc = document.querySelector('[name="Description"]');
+        if (desc) {
+            var hint = desc.nextElementSibling;
+            desc.addEventListener('input', function () {
+                hint.textContent = (1000 - this.value.length) + ' characters remaining';
+            });
+        }
+    </script>
+}

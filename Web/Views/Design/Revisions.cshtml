@@ -1,0 +1,189 @@
+﻿@model CyclonApp.Model.ViewModel.RevisionListViewModel;
+@{
+    ViewData["Title"] = "Revision History";
+    Layout = "_Layout";
+}
+
+<div class="page-header">
+    <div>
+        <div class="d-flex align-items-center gap-2 mb-1">
+            <span class="text-mono text-muted" style="font-size:13px;">@(Model.TagNumber ?? "—")</span>
+            <span class="badge bg-primary" style="font-size:11px;">@Model.CycloneType</span>
+        </div>
+        <h1 class="page-title">Revision History</h1>
+        <p class="page-subtitle">
+            @(Model.DesignName ?? Model.TagNumber ?? "Cyclone Design") &middot; Project: <strong>@Model.ProjectName</strong>
+        </p>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+        <a href="@Url.Action("Calculate", new { id = Model.DesignId })" class="btn btn-primary">
+            <i class="bi bi-calculator me-1"></i>New Revision
+        </a>
+        @if (Model.Revisions.Count >= 2)
+        {
+            <a href="@Url.Action("Compare", new { designId = Model.DesignId })" class="btn btn-outline-info">
+                <i class="bi bi-columns-gap me-1"></i>Compare
+            </a>
+        }
+        <a href="@Url.Action("Detail", new { id = Model.DesignId })" class="btn btn-outline-secondary">
+            <i class="bi bi-arrow-left me-1"></i>Back to Design
+        </a>
+    </div>
+</div>
+
+@if (!Model.Revisions.Any())
+{
+    <div class="card">
+        <div class="card-body empty-state">
+            <i class="bi bi-clock-history"></i>
+            <h5>No revisions yet</h5>
+            <p class="text-muted" style="font-size:13px;">Run a calculation to create the first revision.</p>
+            <a href="@Url.Action("Calculate", new { id = Model.DesignId })" class="btn btn-primary btn-sm mt-1">
+                <i class="bi bi-calculator me-1"></i>Calculate Now
+            </a>
+        </div>
+    </div>
+}
+else
+{
+    <div class="card">
+        <div class="card-header">
+            <h5 class="card-title">
+                <i class="bi bi-clock-history me-2 text-primary"></i>All Revisions
+                <span class="badge bg-secondary ms-1">@Model.Revisions.Count</span>
+            </h5>
+        </div>
+        <div class="table-responsive">
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th>Rev.</th>
+                        <th>Note</th>
+                        <th>Flow (CFM)</th>
+                        <th>Particle (µm)</th>
+                        <th>Efficiency</th>
+                        <th>Cut Dia</th>
+                        <th>ΔP (Pa)</th>
+                        <th>Created By</th>
+                        <th>Date</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var rev in Model.Revisions)
+                    {
+                        <tr class="@(rev.IsLatest ? "tr-latest" : "")">
+                            <td>
+                                <span class="badge @(rev.IsLatest ? "bg-primary" : "bg-secondary")">Rev @rev.RevisionNumber</span>
+                                @if (rev.IsLatest)
+                                {
+                                    <div style="font-size:10px;color:var(--primary);">Latest</div>
+                                }
+                            </td>
+                            <td style="font-size:12.5px;color:var(--text-muted);max-width:160px;">
+                                <span class="text-truncate d-block">@(rev.RevisionNote ?? "—")</span>
+                            </td>
+                            <td class="text-mono">@rev.FlowRateCFM</td>
+                            <td class="text-mono">@rev.ParticleSizeMicron</td>
+                            <td>
+                                @if (rev.HasResults && rev.Efficiency.HasValue)
+                                {
+                                    var efcc = rev.Efficiency >= 95 ? "text-success" : rev.Efficiency >= 80 ? "text-warning" : "text-danger";
+                                    <span class="fw-600 @efcc">@rev.Efficiency.Value.ToString("F2")%</span>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">—</span>
+                                }
+                            </td>
+                            <td class="text-mono">@(rev.CutDiameter.HasValue? rev.CutDiameter.Value.ToString("F2") + " µm" : "—")</td>
+                            <td class="text-mono">@(rev.PressureDropPa.HasValue? rev.PressureDropPa.Value.ToString("F1") : "—")</td>
+                            <td style="font-size:12px;color:var(--text-muted);">@(rev.CreatedBy ?? "—")</td>
+                            <td style="font-size:12px;color:var(--text-muted);">@rev.CreatedAt.ToString("dd MMM yy")</td>
+                            <td>
+                                <div class="d-flex gap-1">
+                                    @if (rev.HasResults)
+                                    {
+                                        <a href="@Url.Action("Results", "Design", new { id = rev.Id })"
+                                           class="btn btn-icon btn-outline-primary btn-sm" title="View Results">
+                                            <i class="bi bi-bar-chart"></i>
+                                        </a>
+                                    }
+                                    <a href="@Url.Action("Calculate", "Design", new { id = Model.DesignId, fromRevision = rev.Id })"
+                                       class="btn btn-icon btn-outline-secondary btn-sm" title="New revision from this">
+                                        <i class="bi bi-arrow-repeat"></i>
+                                    </a>
+                                    <div class="dropdown">
+                                        <button class="btn btn-icon btn-outline-secondary btn-sm dropdown-toggle no-caret"
+                                                data-bs-toggle="dropdown" title="More actions">
+                                            <i class="bi bi-three-dots-vertical"></i>
+                                        </button>
+                                        <ul class="dropdown-menu dropdown-menu-end" style="font-size:13px;min-width:200px">
+                                            @if (rev.HasResults)
+                                            {
+                                                <li>
+                                                    <a class="dropdown-item"
+                                                       href="@Url.Action("Results", "Design", new { id = rev.Id })">
+                                                        <i class="bi bi-bar-chart me-2"></i>View Results
+                                                    </a>
+                                                </li>
+                                            }
+                                            <li>
+                                                <a class="dropdown-item"
+                                                   href="@Url.Action("Calculate", "Design", new { id = Model.DesignId, fromRevision = rev.Id })">
+                                                    <i class="bi bi-arrow-repeat me-2"></i>New Revision from This
+                                                </a>
+                                            </li>
+                                            @if (Model.Revisions.Count >= 2)
+                                            {
+                                                <li>
+                                                    <a class="dropdown-item"
+                                                       href="@Url.Action("Compare", "Design", new { designId = Model.DesignId, revAId = rev.Id })">
+                                                        <i class="bi bi-arrows-expand me-2"></i>Compare Revisions
+                                                    </a>
+                                                </li>
+                                            }
+                                            @if (rev.HasResults)
+                                            {
+                                                <li><hr class="dropdown-divider" /></li>
+                                                <li>
+                                                    <a class="dropdown-item"
+                                                       href="@Url.Action("Pdf", "Export", new { revisionId = rev.Id })"
+                                                       target="_blank">
+                                                        <i class="bi bi-file-pdf me-2 text-danger"></i>Export PDF
+                                                    </a>
+                                                </li>
+                                                <li>
+                                                    <a class="dropdown-item"
+                                                       href="@Url.Action("Excel", "Export", new { revisionId = rev.Id })">
+                                                        <i class="bi bi-file-excel me-2 text-success"></i>Export Excel
+                                                    </a>
+                                                </li>
+                                            }
+                                        </ul>
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+}
+
+@section Styles {
+    <style>
+        .fw-600 {
+            font-weight: 600;
+        }
+
+        .tr-latest {
+            background: rgba(26,86,219,.04);
+        }
+
+        .no-caret::after {
+            display: none !important;
+        }
+    </style>
+}

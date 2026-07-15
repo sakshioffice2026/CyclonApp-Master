@@ -1,0 +1,255 @@
+﻿@using CyclonApp.Database
+@model CyclonApp.Model.ViewModel.AdminPanelViewModel
+@{
+    ViewData["Title"] = "Admin Panel";
+    Layout = "_Layout";
+}
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title"><i class="bi bi-shield-check me-2 text-primary"></i>Admin Panel</h1>
+        <p class="page-subtitle">Platform overview and administration</p>
+    </div>
+</div>
+
+<!-- KPI Cards -->
+<div class="row g-3 mb-4">
+    <div class="col-6 col-md-3">
+        <div class="admin-kpi-card">
+            <div class="admin-kpi-icon" style="background:#EFF6FF">
+                <i class="bi bi-people text-primary fs-4"></i>
+            </div>
+            <div>
+                <div class="admin-kpi-value">@Model.TotalUsers</div>
+                <div class="admin-kpi-label">Total Users</div>
+            </div>
+        </div>
+    </div>
+    @if (User.IsInRole("SuperAdmin"))
+    {
+        <div class="col-6 col-md-3">
+            <div class="admin-kpi-card">
+                <div class="admin-kpi-icon" style="background:#F5F3FF">
+                    <i class="bi bi-building fs-4" style="color:#7C3AED"></i>
+                </div>
+                <div>
+                    <div class="admin-kpi-value">@Model.TotalTenants</div>
+                    <div class="admin-kpi-label">Tenants</div>
+                </div>
+            </div>
+        </div>
+    }
+    <div class="col-6 col-md-3">
+        <div class="admin-kpi-card">
+            <div class="admin-kpi-icon" style="background:#F0FDF4">
+                <i class="bi bi-person-check text-success fs-4"></i>
+            </div>
+            <div>
+                <div class="admin-kpi-value">@Model.ActiveUsers</div>
+                <div class="admin-kpi-label">Active Users</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-6 col-md-3">
+        <div class="admin-kpi-card">
+            <div class="admin-kpi-icon" style="background:#FFF7ED">
+                <i class="bi bi-folder2 text-warning fs-4"></i>
+            </div>
+            <div>
+                <div class="admin-kpi-value">@Model.TotalProjects</div>
+                <div class="admin-kpi-label">Projects</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4">
+    <!-- Users by Role -->
+    <div class="col-md-6">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-people me-2 text-primary"></i>Users by Role
+                </h5>
+                <a href="@Url.Action("Users","Admin")" class="btn btn-sm btn-outline-primary">
+                    <i class="bi bi-arrow-right me-1"></i>Manage Users
+                </a>
+            </div>
+            <div class="table-responsive">
+                <table class="table mb-0">
+                    <thead>
+                        <tr>
+                            <th>Role</th>
+                            <th>Count</th>
+                            <th>% of Total</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var role in Model.UsersByRole)
+                        {
+                            var pct = Model.TotalUsers > 0
+                            ? (role.Value * 100.0 / Model.TotalUsers) : 0;
+                            <tr>
+                                <td>
+                                    <span class="badge"
+                                          style="background:@RoleBadgeColor(role.Key);font-size:11.5px">
+                                        @role.Key
+                                    </span>
+                                </td>
+                                <td style="font-weight:600">@role.Value</td>
+                                <td>
+                                    <div class="d-flex align-items-center gap-2">
+                                        <div class="progress flex-grow-1" style="height:6px">
+                                            <div class="progress-bar"
+                                                 style="width:@pct.ToString("F0")%;background:@RoleBadgeColor(role.Key)">
+                                            </div>
+                                        </div>
+                                        <span class="text-muted" style="font-size:12px;min-width:36px">
+                                            @pct.ToString("F0")%
+                                        </span>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    @if (User.IsInRole("SuperAdmin"))
+    {
+        <!-- Tenants overview -->
+        <div class="col-md-6">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-building me-2 text-primary"></i>Tenants
+                    </h5>
+                    <a href="@Url.Action("Tenants","Admin")" class="btn btn-sm btn-outline-primary">
+                        <i class="bi bi-arrow-right me-1"></i>View All
+                    </a>
+                </div>
+                <div class="table-responsive">
+                    <table class="table mb-0">
+                        <thead>
+                            <tr>
+                                <th>Tenant</th>
+                                <th>Users</th>
+                                <th>Projects</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var t in Model.TenantSummaries)
+                            {
+                                <tr>
+                                    <td style="font-weight:600">@t.Name</td>
+                                    <td>@t.UserCount</td>
+                                    <td>@t.ProjectCount</td>
+                                    <td>
+                                        @if (t.IsActive)
+                                        {
+                                            <span class="badge bg-success">Active</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="badge bg-secondary">Inactive</span>
+                                        }
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    }
+    else
+    {
+        <!-- Recent Users for ClientAdmin -->
+        <div class="col-md-6">
+            <div class="card h-100">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-clock-history me-2 text-primary"></i>Recent Users
+                    </h5>
+                    <a href="@Url.Action("Users","Admin")" class="btn btn-sm btn-outline-primary">
+                        View All
+                    </a>
+                </div>
+                <div class="list-group list-group-flush">
+                    @foreach (var u in Model.RecentUsers)
+                    {
+                        <div class="list-group-item py-2 px-3">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div>
+                                    <div style="font-weight:600;font-size:13.5px">@u.DisplayName</div>
+                                    <div class="text-muted" style="font-size:12px">@u.Email</div>
+                                </div>
+                                <div class="d-flex align-items-center gap-2">
+                                    <span class="badge"
+                                          style="background:@RoleBadgeColor(u.Role);font-size:10.5px">
+                                        @u.Role
+                                    </span>
+                                    <span class="text-muted" style="font-size:11px">
+                                        @(u.LastLoginAt?.ToString("dd MMM") ?? "Never")
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    }
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@functions {
+    string RoleBadgeColor(string? role) => role switch
+    {
+        "SuperAdmin" => "#7C3AED",
+        "ClientAdmin" => "#1A56DB",
+        "Engineer" => "#16A34A",
+        "Viewer" => "#64748B",
+        _ => "#64748B"
+    };
+}
+
+@section Styles {
+    <style>
+        .admin-kpi-card {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px 18px;
+            box-shadow: var(--shadow);
+        }
+
+        .admin-kpi-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .admin-kpi-value {
+            font-size: 26px;
+            font-weight: 700;
+            color: var(--text);
+            line-height: 1;
+        }
+
+        .admin-kpi-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 3px;
+        }
+    </style>
+}

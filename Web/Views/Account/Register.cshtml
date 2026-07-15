@@ -1,0 +1,223 @@
+﻿@model CyclonApp.Model.ViewModel.RegisterViewModel
+@{
+    ViewData["Title"] = "Create Account";
+    Layout = "_Layout";
+}
+
+
+<div class="row">
+    <div class="col-lg-7">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title">
+                    <i class="bi bi-person-plus me-2 text-primary"></i>User Details
+                </h5>
+            </div>
+            <div class="card-body">
+
+                @if (TempData["Success"] != null)
+                {
+                    <div class="alert alert-success">@TempData["Success"]</div>
+                }
+
+                <form asp-action="Register" asp-controller="Account" method="post">
+
+                    @if (!ViewData.ModelState.IsValid)
+                    {
+                        <div class="alert alert-danger py-2 px-3 mb-4"
+                             style="font-size:13px; border-radius:8px;">
+                            <div asp-validation-summary="All"></div>
+                        </div>
+                    }
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-sm-6">
+                            <label asp-for="FirstName" class="form-label">
+                                First Name <span class="text-danger">*</span>
+                            </label>
+                            <input asp-for="FirstName" class="form-control" placeholder="John" />
+                            <span asp-validation-for="FirstName" class="text-danger"></span>
+                        </div>
+                        <div class="col-sm-6">
+                            <label asp-for="LastName" class="form-label">
+                                Last Name <span class="text-danger">*</span>
+                            </label>
+                            <input asp-for="LastName" class="form-control" placeholder="Smith" />
+                            <span asp-validation-for="LastName" class="text-danger"></span>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label asp-for="Designation" class="form-label">Job Title / Designation</label>
+                        <input asp-for="Designation" class="form-control"
+                               placeholder="e.g. Senior Mechanical Engineer" />
+                    </div>
+
+                    <div class="mb-3">
+                        <label asp-for="Email" class="form-label">
+                            Email Address <span class="text-danger">*</span>
+                        </label>
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="bi bi-envelope"></i></span>
+                            <input asp-for="Email" class="form-control"
+                                   placeholder="you@company.com" autocomplete="off" />
+                        </div>
+                        <span asp-validation-for="Email" class="text-danger"></span>
+                    </div>
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-sm-6">
+                            <label asp-for="Password" class="form-label">
+                                Password <span class="text-danger">*</span>
+                            </label>
+                            <input asp-for="Password" class="form-control"
+                                   placeholder="Min 8 characters" autocomplete="new-password" />
+                            <span asp-validation-for="Password" class="text-danger"></span>
+                        </div>
+                        <div class="col-sm-6">
+                            <label asp-for="ConfirmPassword" class="form-label">
+                                Confirm Password <span class="text-danger">*</span>
+                            </label>
+                            <input asp-for="ConfirmPassword" class="form-control"
+                                   placeholder="Repeat password" autocomplete="new-password" />
+                            <span asp-validation-for="ConfirmPassword" class="text-danger"></span>
+                        </div>
+                    </div>
+
+                    @* Tenant dropdown — visible to everyone *@
+                    @if (ViewBag.Tenants != null)
+                    {
+                        <div class="mb-3">
+                            <label asp-for="TenantId" class="form-label">
+                                Company / Tenant <span class="text-danger">*</span>
+                            </label>
+                            <select asp-for="TenantId" class="form-select"
+                                    asp-items="@(new SelectList(ViewBag.Tenants, "Id", "Name"))">
+                                <option value="">— Select your company —</option>
+                            </select>
+                            <span asp-validation-for="TenantId" class="text-danger"></span>
+                        </div>
+                    }
+
+                    @* Role selector *@
+                    <div class="mb-4">
+                        <label class="form-label">
+                            Role <span class="text-danger">*</span>
+                        </label>
+                        <span asp-validation-for="UserRoleId" class="text-danger d-block mb-2"></span>
+                        <div class="role-selector">
+                            @foreach (var role in (List<CyclonApp.Database.UserRole>)ViewBag.Roles)
+                            {
+                                <div class="role-option">
+                                    <input type="radio"
+                                           name="UserRoleId"
+                                           value="@role.Id"
+                                           id="role_@role.Id"
+                                           @(role.RoleName == "Engineer" ? "checked" : "")
+                                           class="role-radio" />
+                                    <label for="role_@role.Id" class="role-label">
+                                        <span class="role-icon">
+                                            @if (role.RoleName == "SuperAdmin")
+                                            {
+                                                <i class="bi bi-shield-fill-check"></i>
+                                            }
+                                            else if (role.RoleName == "ClientAdmin")
+                                            {
+                                                <i class="bi bi-person-gear"></i>
+                                            }
+                                            else if (role.RoleName == "Engineer")
+                                            {
+                                                <i class="bi bi-calculator"></i>
+                                            }
+                                            else
+                                            {
+                                                <i class="bi bi-eye"></i>
+                                            }
+                                        </span>
+                                        <span class="role-name">@role.RoleName</span>
+                                    </label>
+                                </div>
+                            }
+                        </div>
+                    </div>
+
+                    <div class="d-flex gap-2">
+                        <button type="submit" class="btn btn-primary">
+                            <i class="bi bi-person-check me-1"></i>Create Account
+                        </button>
+                        <a asp-controller="Account" asp-action="Login"
+                           class="btn btn-outline-secondary">
+                            Already have an account? Login
+                        </a>
+                    </div>
+
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-lg-5">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title">
+                    <i class="bi bi-info-circle me-2 text-info"></i>Role Permissions
+                </h5>
+            </div>
+            <div class="card-body p-0">
+                <table class="table mb-0">
+                    <thead>
+                        <tr>
+                            <th>Role</th>
+                            <th>Capabilities</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="badge bg-danger">SuperAdmin</span></td>
+                            <td style="font-size:12px;">Manage all tenants, users, and platform config</td>
+                        </tr>
+                        <tr>
+                            <td><span class="badge bg-warning text-dark">ClientAdmin</span></td>
+                            <td style="font-size:12px;">Manage users within own tenant, view all projects</td>
+                        </tr>
+                        <tr>
+                            <td><span class="badge bg-primary">Engineer</span></td>
+                            <td style="font-size:12px;">Full design CRUD, calculate, export reports</td>
+                        </tr>
+                        <tr>
+                            <td><span class="badge bg-secondary">Viewer</span></td>
+                            <td style="font-size:12px;">Read-only access to projects and results</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Styles {
+<style>
+/* .role-selector { display: flex; gap: 10px; flex-wrap: wrap; } */
+.role-option   { flex: 1; min-width: 110px; }
+/* .role-radio    { display: none; } */
+/* .role-label { */
+/*     display: flex; flex-direction: column; align-items: center; justify-content: center; */
+/*     gap: 6px; padding: 14px 10px; */
+/*     border: 2px solid var(--border); border-radius: 10px; */
+/*     cursor: pointer; text-align: center; */
+/*     transition: border-color .15s, background .15s; */
+/*     font-size: 12.5px; font-weight: 500; color: var(--text-muted); */
+/* } */
+.role-icon { font-size: 20px; }
+.role-radio:checked + .role-label {
+    border-color: var(--primary);
+    background: var(--primary-light);
+    color: var(--primary-dark);
+}
+.role-label:hover { border-color: var(--primary); }
+</style>
+}
+
+@section Scripts {
+    <partial name="_ValidationScriptsPartial" />
+}

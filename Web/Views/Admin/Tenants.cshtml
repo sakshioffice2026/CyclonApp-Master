@@ -1,0 +1,38 @@
+﻿@using CyclonApp.Database
+@model List<Tenant>
+@{ ViewData["Title"] = "Tenants"; Layout = "_Layout"; }
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title">Tenants</h1>
+        <p class="page-subtitle">Manage organisations</p>
+    </div>
+</div>
+
+<div class="card">
+    <div class="table-responsive">
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Slug</th>
+                    <th>Email</th>
+                    <th>Active</th>
+                    <th>Created</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var t in Model)
+                {
+                    <tr>
+                        <td>@t.Name</td>
+                        <td class="text-mono">@t.Slug</td>
+                        <td>@(t.ContactEmail ?? "—")</td>
+                        <td>@(t.IsActive ? "✓" : "—")</td>
+                        <td>@t.CreatedAt.ToString("dd MMM yyyy")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>

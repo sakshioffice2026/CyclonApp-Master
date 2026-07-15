@@ -1,0 +1,203 @@
+﻿@using CyclonApp.Database
+@model List<CycloneDesign>
+@{
+    ViewData["Title"] = "All Designs";
+    Layout = "_Layout";
+}
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title"><i class="bi bi-diagram-3 me-2 text-primary"></i>All Designs</h1>
+        <p class="page-subtitle">All cyclone designs across your projects</p>
+    </div>
+    <a href="@Url.Action("Index","Project")" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-folder2-open me-1"></i>View by Project
+    </a>
+</div>
+
+@if (!Model.Any())
+{
+    <div class="card">
+        <div class="card-body empty-state">
+            <i class="bi bi-diagram-3"></i>
+            <h5>No designs yet</h5>
+            <p class="text-muted" style="font-size:13px">Open a project and add a cyclone design to get started.</p>
+            <a href="@Url.Action("Index","Project")" class="btn btn-primary btn-sm mt-1">
+                <i class="bi bi-folder2-open me-1"></i>Go to Projects
+            </a>
+        </div>
+    </div>
+}
+else
+{
+    <div class="card">
+        <div class="card-header">
+            <h5 class="card-title">
+                <i class="bi bi-table me-2 text-primary"></i>@Model.Count design(s)
+            </h5>
+        </div>
+        <div class="table-responsive">
+            <table class="table" id="designsTable">
+                <thead>
+                    <tr>
+                        <th>Tag</th>
+                        <th>Name</th>
+                        <th>Project</th>
+                        <th>Type</th>
+                        <th>Rev.</th>
+                        <th>Last Calculated</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var d in Model)
+                    {
+                        var latestCalc = d.Revisions
+                        .Where(r => r.CalculatedAt != null)
+                        .OrderByDescending(r => r.CalculatedAt)
+                        .FirstOrDefault();
+
+                        <tr>
+                            <td>
+                                <a href="@Url.Action("Detail","Design", new { id = d.Id })"
+                                   class="text-mono" style="font-weight:600;color:var(--primary);text-decoration:none">
+                                    @(d.TagNumber ?? $"DES-{d.Id:D3}")
+                                </a>
+                            </td>
+                            <td style="font-size:13px">@(d.Name ?? "—")</td>
+                            <td>
+                                <a href="@Url.Action("Detail","Project", new { id = d.ProjectId })"
+                                   style="text-decoration:none;color:var(--text);font-size:13px">
+                                    @(d.Project?.Name ?? "—")
+                                </a>
+                            </td>
+                            <td>
+                                <span class="cyclone-type-badge">@(d.CycloneType?.Name ?? "—")</span>
+                            </td>
+                            <td>
+                                <span class="badge bg-secondary">Rev @d.CurrentRevision</span>
+                            </td>
+                            <td style="font-size:12.5px;color:var(--text-muted)">
+                                @(latestCalc?.CalculatedAt?.ToString("dd MMM yyyy") ?? "—")
+                            </td>
+                            <td>
+                                <div class="d-flex gap-1">
+
+                                    <!-- View -->
+                                    <a href="@Url.Action("Detail","Design", new { id = d.Id })"
+                                       class="btn btn-icon btn-outline-primary btn-sm" title="View Detail">
+                                        <i class="bi bi-eye"></i>
+                                    </a>
+
+                                    <!-- Calculate (Engineer+ only) -->
+                                    @if (User.IsInRole("Engineer") || User.IsInRole("ClientAdmin") || User.IsInRole("SuperAdmin"))
+                                    {
+                                        <a href="@Url.Action("Calculate","Design", new { id = d.Id })"
+                                           class="btn btn-icon btn-outline-success btn-sm" title="New Calculation">
+                                            <i class="bi bi-calculator"></i>
+                                        </a>
+                                    }
+
+                                    <!-- More actions dropdown -->
+                                    <div class="dropdown">
+                                        <button class="btn btn-icon btn-outline-secondary btn-sm dropdown-toggle no-caret"
+                                                data-bs-toggle="dropdown" title="More actions">
+                                            <i class="bi bi-three-dots-vertical"></i>
+                                        </button>
+                                        <ul class="dropdown-menu dropdown-menu-end" style="font-size:13px;min-width:190px">
+                                            <li>
+                                                <a class="dropdown-item"
+                                                   href="@Url.Action("Detail","Design", new { id = d.Id })">
+                                                    <i class="bi bi-eye me-2"></i>View Detail
+                                                </a>
+                                            </li>
+                                            <li>
+                                                <a class="dropdown-item"
+                                                   href="@Url.Action("Revisions","Design", new { id = d.Id })">
+                                                    <i class="bi bi-clock-history me-2"></i>View Revisions
+                                                </a>
+                                            </li>
+                                            @if (latestCalc != null)
+                                            {
+                                                <li>
+                                                    <a class="dropdown-item"
+                                                       href="@Url.Action("Results","Design", new { id = latestCalc.Id })">
+                                                        <i class="bi bi-bar-chart me-2"></i>Latest Results
+                                                    </a>
+                                                </li>
+                                            }
+                                            <li><hr class="dropdown-divider" /></li>
+                                            @if (User.IsInRole("Engineer") || User.IsInRole("ClientAdmin") || User.IsInRole("SuperAdmin"))
+                                            {
+                                                <li>
+                                                    <a class="dropdown-item"
+                                                       href="@Url.Action("Calculate","Design", new { id = d.Id })">
+                                                        <i class="bi bi-calculator me-2"></i>New Calculation
+                                                    </a>
+                                                </li>
+                                                <li>
+                                                    <a class="dropdown-item"
+                                                       href="@Url.Action("Compare","Design", new { designId = d.Id })">
+                                                        <i class="bi bi-arrows-expand me-2"></i>Compare Revisions
+                                                    </a>
+                                                </li>
+                                                <li><hr class="dropdown-divider" /></li>
+                                            }
+                                            <li>
+                                                <a class="dropdown-item"
+                                                   href="@Url.Action("Index","Export", new { designId = d.Id })">
+                                                    <i class="bi bi-file-earmark-arrow-down me-2"></i>Export PDF / Excel
+                                                </a>
+                                            </li>
+                                            <li>
+                                                <a class="dropdown-item"
+                                                   href="@Url.Action("Detail","Project", new { id = d.ProjectId })">
+                                                    <i class="bi bi-folder2-open me-2"></i>Open Project
+                                                </a>
+                                            </li>
+                                        </ul>
+                                    </div>
+
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+}
+
+@section Styles {
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.7/css/dataTables.bootstrap5.min.css" />
+    <style>
+        .cyclone-type-badge {
+            background: var(--primary-light, #EFF6FF);
+            color: var(--primary-dark, #1240A8);
+            font-size: 11.5px;
+            font-weight: 500;
+            padding: 3px 9px;
+            border-radius: 20px;
+            white-space: nowrap;
+        }
+
+        .no-caret::after {
+            display: none !important;
+        }
+    </style>
+}
+
+@section Scripts {
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.7/js/jquery.dataTables.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.7/js/dataTables.bootstrap5.min.js"></script>
+    <script>
+        $(document).ready(function () {
+            $('#designsTable').DataTable({
+                pageLength: 25,
+                order: [[5, 'desc']],
+                columnDefs: [{ orderable: false, targets: [6] }]
+            });
+        });
+    </script>
+}

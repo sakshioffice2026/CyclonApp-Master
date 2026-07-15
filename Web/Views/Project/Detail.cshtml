@@ -1,0 +1,315 @@
+﻿@using CyclonApp.Database
+@model CyclonApp.Model.ViewModel.ProjectDetailViewModel;
+@{
+    ViewData["Title"] = Model.Name;
+    Layout = "_Layout";
+}
+
+<!-- ── Page Header ──────────────────────────────────────────────────────── -->
+<div class="page-header">
+    <div>
+        <div class="d-flex align-items-center gap-2 mb-1">
+            <span class="text-mono text-muted" style="font-size:13px;">@Model.ProjectNumber</span>
+            <span class="badge badge-@Model.Status.ToString().ToLower()">@Model.Status</span>
+        </div>
+        <h1 class="page-title">@Model.Name</h1>
+        <p class="page-subtitle">
+            @if (!string.IsNullOrEmpty(Model.ClientName))
+            {
+                <span><i class="bi bi-building me-1"></i>@Model.ClientName</span>
+            }
+            @if (!string.IsNullOrEmpty(Model.Location))
+            {
+                <span class="ms-3"><i class="bi bi-geo-alt me-1"></i>@Model.Location</span>
+            }
+        </p>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+        @if (Model.Status != ProjectStatus.Archived)
+        {
+            if (User.IsInRole("Engineer") || User.IsInRole("ClientAdmin") || User.IsInRole("SuperAdmin"))
+            {
+                <a href="@Url.Action("Create", "Design", new { projectId = Model.Id })"
+                   class="btn btn-primary">
+                    <i class="bi bi-plus-lg me-1"></i>Add Design
+                </a>
+                <a href="@Url.Action("Edit", new { id = Model.Id })"
+                   class="btn btn-outline-secondary">
+                    <i class="bi bi-pencil me-1"></i>Edit
+                </a>
+            }
+        }
+        <a href="@Url.Action("Index")" class="btn btn-outline-secondary">
+            <i class="bi bi-arrow-left me-1"></i>All Projects
+        </a>
+    </div>
+</div>
+
+<div class="row g-4">
+
+    <!-- ── Left Column ───────────────────────────────────────────────────── -->
+    <div class="col-lg-8">
+
+        <!-- Designs List -->
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title">
+                    <i class="bi bi-calculator me-2 text-primary"></i>
+                    Cyclone Designs
+                    <span class="badge bg-primary ms-2">@Model.Designs.Count</span>
+                </h5>
+                @if (Model.Status != ProjectStatus.Archived &&
+                (User.IsInRole("Engineer") || User.IsInRole("ClientAdmin") || User.IsInRole("SuperAdmin")))
+                {
+                    <a href="@Url.Action("Create", "Design", new { projectId = Model.Id })"
+                       class="btn btn-primary btn-sm">
+                        <i class="bi bi-plus-lg me-1"></i>New Design
+                    </a>
+                }
+            </div>
+
+            @if (!Model.Designs.Any())
+            {
+                <div class="empty-state">
+                    <i class="bi bi-calculator"></i>
+                    <h5>No designs yet</h5>
+                    <p class="text-muted" style="font-size:13px;">
+                        Add a cyclone design to start calculating.
+                    </p>
+                    @if (Model.Status != ProjectStatus.Archived)
+                    {
+                        <a href="@Url.Action("Create", "Design", new { projectId = Model.Id })"
+                           class="btn btn-primary btn-sm mt-1">
+                            <i class="bi bi-plus-lg me-1"></i>Add First Design
+                        </a>
+                    }
+                </div>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Tag / Name</th>
+                                <th>Cyclone Type</th>
+                                <th style="width:80px; text-align:center;">Rev.</th>
+                                <th style="width:90px;">Results</th>
+                                <th style="width:120px;">Created</th>
+                                <th style="width:110px;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var d in Model.Designs)
+                            {
+                                <tr>
+                                    <td>
+                                        <a href="@Url.Action("Detail", "Design", new { id = d.Id })"
+                                           style="text-decoration:none; color:var(--text);">
+                                            <div style="font-weight:600; font-size:13.5px;">
+                                                @(d.TagNumber ?? $"DES-{d.Id:D3}")
+                                            </div>
+                                            @if (!string.IsNullOrEmpty(d.Name))
+                                            {
+                                                <div style="font-size:12px; color:var(--text-muted);">@d.Name</div>
+                                            }
+                                        </a>
+                                    </td>
+                                    <td>
+                                        <span class="cyclone-type-badge">@d.CycloneType</span>
+                                    </td>
+                                    <td style="text-align:center;">
+                                        <span class="badge bg-secondary">Rev @d.CurrentRevision</span>
+                                    </td>
+                                    <td>
+                                        @if (d.HasResults)
+                                        {
+                                            <span style="color:var(--success); font-size:12.5px;">
+                                                <i class="bi bi-check-circle-fill me-1"></i>Calculated
+                                            </span>
+                                        }
+                                        else
+                                        {
+                                            <span style="color:var(--text-muted); font-size:12.5px;">
+                                                <i class="bi bi-dash-circle me-1"></i>Pending
+                                            </span>
+                                        }
+                                    </td>
+                                    <td style="font-size:12.5px; color:var(--text-muted);">
+                                        @d.CreatedAt.ToString("dd MMM yyyy")
+                                    </td>
+                                    <td>
+                                        <div class="d-flex gap-1">
+                                            <a href="@Url.Action("Detail", "Design", new { id = d.Id })"
+                                               class="btn btn-icon btn-outline-primary btn-sm" title="Open Design">
+                                                <i class="bi bi-arrow-right-circle"></i>
+                                            </a>
+                                            @if (d.HasResults)
+                                            {
+                                                <a href="@Url.Action("Index", "Export", new { designId = d.Id })"
+                                                   class="btn btn-icon btn-outline-success btn-sm" title="Export">
+                                                    <i class="bi bi-download"></i>
+                                                </a>
+                                            }
+                                        </div>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </div>
+    </div>
+
+    <!-- ── Right Column ──────────────────────────────────────────────────── -->
+    <div class="col-lg-4">
+
+        <!-- Project Info Card -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="card-title"><i class="bi bi-info-circle me-2 text-info"></i>Project Info</h5>
+            </div>
+            <div class="card-body p-0">
+                <table class="table table-borderless mb-0" style="font-size:13px;">
+                    <tr>
+                        <td class="text-muted ps-3" style="width:42%; padding-top:10px;">Project No.</td>
+                        <td class="fw-600 text-mono pe-3" style="padding-top:10px;">@Model.ProjectNumber</td>
+                    </tr>
+                    <tr>
+                        <td class="text-muted ps-3">Status</td>
+                        <td class="pe-3">
+                            <span class="badge badge-@Model.Status.ToString().ToLower()">@Model.Status</span>
+                        </td>
+                    </tr>
+                    @if (!string.IsNullOrEmpty(Model.ClientName))
+                    {
+                        <tr>
+                            <td class="text-muted ps-3">Client</td>
+                            <td class="pe-3">@Model.ClientName</td>
+                        </tr>
+                    }
+                    @if (!string.IsNullOrEmpty(Model.Location))
+                    {
+                        <tr>
+                            <td class="text-muted ps-3">Location</td>
+                            <td class="pe-3">@Model.Location</td>
+                        </tr>
+                    }
+                    <tr>
+                        <td class="text-muted ps-3">Designs</td>
+                        <td class="pe-3">@Model.Designs.Count</td>
+                    </tr>
+                    <tr>
+                        <td class="text-muted ps-3">Created By</td>
+                        <td class="pe-3">@Model.CreatedBy</td>
+                    </tr>
+                    <tr>
+                        <td class="text-muted ps-3">Created</td>
+                        <td class="pe-3">@Model.CreatedAt.ToString("dd MMM yyyy")</td>
+                    </tr>
+                    @if (Model.UpdatedAt.HasValue)
+                    {
+                        <tr>
+                            <td class="text-muted ps-3 pb-3">Last Updated</td>
+                            <td class="pe-3 pb-3">@Model.UpdatedAt.Value.ToString("dd MMM yyyy")</td>
+                        </tr>
+                    }
+                </table>
+            </div>
+        </div>
+
+        <!-- Description -->
+        @if (!string.IsNullOrEmpty(Model.Description))
+        {
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5 class="card-title"><i class="bi bi-card-text me-2 text-secondary"></i>Description</h5>
+                </div>
+                <div class="card-body">
+                    <p style="font-size:13px; color:var(--text); white-space:pre-line; margin:0;">@Model.Description</p>
+                </div>
+            </div>
+        }
+
+        <!-- Status Management -->
+        @if (User.IsInRole("Engineer") || User.IsInRole("ClientAdmin") || User.IsInRole("SuperAdmin"))
+        {
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title"><i class="bi bi-arrow-repeat me-2 text-warning"></i>Change Status</h5>
+                </div>
+                <div class="card-body d-flex flex-column gap-2">
+                    @if (Model.Status != ProjectStatus.Active && Model.Status != ProjectStatus.Archived)
+                    {
+                        <form asp-action="ChangeStatus" method="post">
+                            @Html.AntiForgeryToken()
+                            <input type="hidden" name="id" value="@Model.Id" />
+                            <input type="hidden" name="newStatus" value="Active" />
+                            <button type="submit" class="btn btn-outline-success w-100 text-start btn-sm">
+                                <i class="bi bi-play-circle me-2"></i>Mark as Active
+                            </button>
+                        </form>
+                    }
+                    @if (Model.Status == ProjectStatus.Active)
+                    {
+                        <form asp-action="ChangeStatus" method="post">
+                            @Html.AntiForgeryToken()
+                            <input type="hidden" name="id" value="@Model.Id" />
+                            <input type="hidden" name="newStatus" value="Completed" />
+                            <button type="submit" class="btn btn-outline-info w-100 text-start btn-sm">
+                                <i class="bi bi-check-circle me-2"></i>Mark as Completed
+                            </button>
+                        </form>
+                    }
+                    @if (Model.Status != ProjectStatus.Archived)
+                    {
+                        <form asp-action="ChangeStatus" method="post">
+                            @Html.AntiForgeryToken()
+                            <input type="hidden" name="id" value="@Model.Id" />
+                            <input type="hidden" name="newStatus" value="Archived" />
+                            <button type="submit"
+                                    class="btn btn-outline-warning w-100 text-start btn-sm"
+                                    data-confirm="Archive this project? It will become read-only.">
+                                <i class="bi bi-archive me-2"></i>Archive Project
+                            </button>
+                        </form>
+                    }
+                    else
+                    {
+                        <form asp-action="ChangeStatus" method="post">
+                            @Html.AntiForgeryToken()
+                            <input type="hidden" name="id" value="@Model.Id" />
+                            <input type="hidden" name="newStatus" value="Active" />
+                            <button type="submit" class="btn btn-outline-success w-100 text-start btn-sm">
+                                <i class="bi bi-arrow-counterclockwise me-2"></i>Restore Project
+                            </button>
+                        </form>
+                        <div class="alert alert-warning py-2 px-3 mb-0" style="font-size:12px; border-radius:8px;">
+                            <i class="bi bi-lock me-1"></i>This project is archived and read-only.
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+
+    </div>
+</div>
+
+@section Styles {
+    <style>
+        .cyclone-type-badge {
+            background: var(--primary-light);
+            color: var(--primary-dark);
+            font-size: 11.5px;
+            font-weight: 500;
+            padding: 3px 9px;
+            border-radius: 20px;
+            white-space: nowrap;
+        }
+
+        .fw-600 {
+            font-weight: 600;
+        }
+    </style>
+}
