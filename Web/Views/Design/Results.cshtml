@@ -110,16 +110,16 @@
                         @{
                             var rows = new[]
                             {
-                        ("Barrel Dia (Dc)",    Model.BarrelDiameterIn, Model.BarrelDiameterMm),
-                        ("Inlet Height (H)",   Model.InletHeightIn,    Model.InletHeightMm),
-                        ("Inlet Width (W)",    Model.InletWidthIn,     Model.InletWidthMm),
-                        ("Barrel Height (Lb)", Model.BarrelHeightIn,   Model.BarrelHeightMm),
-                        ("Cone Height (Lc)",   Model.ConeHeightIn,     Model.ConeHeightMm),
-                        ("Exhaust Dia (De)",   Model.ExhaustDiaIn,     Model.ExhaustDiaMm),
-                        ("Exhaust Length",     Model.ExhaustLengthIn,  Model.ExhaustLengthMm),
-                        ("Bottom Outlet (Dd)", Model.BottomOutletIn,   Model.BottomOutletMm),
-                        ("Total Height",       Model.TotalHeightIn,    Model.TotalHeightMm),
-                        };
+                                                ("Barrel Dia (Dc)",    Model.BarrelDiameterIn, Model.BarrelDiameterMm),
+                                                ("Inlet Height (H)",   Model.InletHeightIn,    Model.InletHeightMm),
+                                                ("Inlet Width (W)",    Model.InletWidthIn,     Model.InletWidthMm),
+                                                ("Barrel Height (Lb)", Model.BarrelHeightIn,   Model.BarrelHeightMm),
+                                                ("Cone Height (Lc)",   Model.ConeHeightIn,     Model.ConeHeightMm),
+                                                ("Exhaust Dia (De)",   Model.ExhaustDiaIn,     Model.ExhaustDiaMm),
+                                                ("Exhaust Length",     Model.ExhaustLengthIn,  Model.ExhaustLengthMm),
+                                                ("Bottom Outlet (Dd)", Model.BottomOutletIn,   Model.BottomOutletMm),
+                                                ("Total Height",       Model.TotalHeightIn,    Model.TotalHeightMm),
+                                                };
                         }
                         @foreach (var (label, inVal, mmVal) in rows)
                         {
@@ -224,6 +224,115 @@
 
 </div>
 
+<!-- ── AI-Assisted Prediction ─────────────────────────────────────────── -->
+<div class="row g-4 mt-1">
+    <div class="col-12">
+        @if (Model.HasPrediction)
+        {
+            var trusted = Model.PredictionIsWithinTrustedRange;
+            var badgeBg = trusted ? "#dcfce7" : "#fef3c7";
+            var badgeFg = trusted ? "#16a34a" : "#d97706";
+            var badgeBd = trusted ? "#86efac" : "#fcd34d";
+            var effDeltaPts = Model.PredictionEfficiency - Model.Efficiency;
+            var dpDeltaPct = Model.PressureDropPa != 0
+            ? (Model.PredictionPressureDropPa - Model.PressureDropPa) / Model.PressureDropPa * 100.0
+            : 0;
+
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <h5 class="card-title mb-0">
+                        <i class="bi bi-cpu me-2 text-primary"></i>AI-Assisted Estimate
+                    </h5>
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="badge" style="background:@badgeBg;color:@badgeFg;border:1px solid @badgeBd;">
+                            @(trusted ? "Within trusted range" : "Indicative only")
+                        </span>
+                        <form asp-action="PredictWithModel" asp-route-id="@Model.RevisionId" method="post" class="d-inline">
+                            @Html.AntiForgeryToken()
+                            <button type="submit" class="btn btn-outline-primary btn-sm">
+                                <i class="bi bi-arrow-repeat me-1"></i>Re-run Estimate
+                            </button>
+                        </form>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted mb-3" style="font-size:12.5px;">
+                        This is a secondary, data-driven estimate shown alongside the standard calculation above —
+                        it never replaces it. The standard calculation remains the number of record for sizing and reporting.
+                    </p>
+                    <div class="row g-3">
+                        <div class="col-6 col-md-3">
+                            <div class="kpi-card">
+                                <div class="kpi-label">Standard Efficiency</div>
+                                <div class="kpi-value" style="font-size:20px;">@Model.Efficiency.ToString("F2")%</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="kpi-card">
+                                <div class="kpi-label">AI Estimate — Efficiency</div>
+                                <div class="kpi-value" style="font-size:20px;color:var(--primary)">
+                                    @Model.PredictionEfficiency.ToString("F2")%
+                                </div>
+                                <div class="kpi-sub">@(effDeltaPts >= 0 ? "+" : "")@effDeltaPts.ToString("F2") pts vs. standard</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="kpi-card">
+                                <div class="kpi-label">Standard Pressure Drop</div>
+                                <div class="kpi-value" style="font-size:20px;">@Model.PressureDropPa.ToString("F1") Pa</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="kpi-card">
+                                <div class="kpi-label">AI Estimate — Pressure Drop</div>
+                                <div class="kpi-value" style="font-size:20px;color:var(--primary)">
+                                    @Model.PredictionPressureDropPa.ToString("F1") Pa
+                                </div>
+                                <div class="kpi-sub">@(dpDeltaPct >= 0 ? "+" : "")@dpDeltaPct.ToString("F1")% vs. standard</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    @if (!string.IsNullOrWhiteSpace(Model.PredictionNotes))
+                    {
+                        <div class="mt-3 p-2" style="background:@badgeBg;border:1px solid @badgeBd;border-radius:6px;font-size:12.5px;color:@badgeFg;">
+                            <i class="bi bi-info-circle me-1"></i>@Model.PredictionNotes
+                        </div>
+                    }
+
+                    <div class="mt-3 d-flex flex-wrap gap-3" style="font-size:11.5px;color:var(--text-muted);">
+                        <span>Deviation from standard calc: @Model.PredictionPhysicsResidual.ToString("F2")%</span>
+                        @if (Model.PredictedAt.HasValue)
+                        {
+                            <span>Generated @Model.PredictedAt.Value.ToString("dd MMM yyyy HH:mm")</span>
+                        }
+                    </div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div class="card">
+                <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-3">
+                    <div>
+                        <h5 class="card-title mb-1"><i class="bi bi-cpu me-2 text-primary"></i>AI-Assisted Estimate</h5>
+                        <p class="text-muted mb-0" style="font-size:12.5px;">
+                            Not generated for this revision yet. This runs a secondary, data-driven check
+                            alongside the standard calculation above — it never replaces it.
+                        </p>
+                    </div>
+                    <form asp-action="PredictWithModel" asp-route-id="@Model.RevisionId" method="post">
+                        @Html.AntiForgeryToken()
+                        <button type="submit" class="btn btn-primary btn-sm">
+                            <i class="bi bi-cpu me-1"></i>Generate Estimate
+                        </button>
+                    </form>
+                </div>
+            </div>
+        }
+    </div>
+</div>
+
 @section Styles {
     <style>
         /* .kpi-card { */
@@ -262,7 +371,7 @@
 }
 
 @section Scripts {
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     <script>
@@ -740,6 +849,6 @@
                 }
             );
 
-        })();    
+        })();
     </script>
 }

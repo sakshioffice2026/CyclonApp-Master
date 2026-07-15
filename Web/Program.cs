@@ -41,7 +41,10 @@ builder.Services.AddScoped<ITenant, TenantRepository>();
 builder.Services.AddScoped<ICyclonCalculation, CyclonCalculationRepository>();
 builder.Services.AddScoped<IUnitOfWork, UnitOfWorks>();
 builder.Services.AddScoped<IDashboardRepository, DashboardRepository>();
+builder.Services.AddScoped<ICyclonePrediction, CyclonePredictionRepository>();
 builder.Services.AddScoped<ExceptionHandlerRepository>();
+builder.Services.AddHttpClient("CyclonePrediction"); // name must match CreateClient("CyclonePrediction") in the repository
+builder.Services.AddScoped<ICyclonePrediction, CyclonePredictionRepository>();
 builder.Services
     .AddControllersWithViews()
     .AddJsonOptions(options =>
