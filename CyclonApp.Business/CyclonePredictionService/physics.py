@@ -103,7 +103,7 @@ def lapple_forward(
     w_m = inlet_w_in * IN_TO_M
 
     dpc_m = torch.sqrt(
-        (9.0 * mu * w_m) / (torch.pi * nt * v_inlet_ms * rho_p + eps) + eps
+        (9.0 * mu * w_m) / (torch.pi * nt * v_inlet_ms * rho_p + eps)
     )
     dpc_micron = dpc_m * 1e6
 
