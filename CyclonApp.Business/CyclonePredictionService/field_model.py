@@ -68,3 +68,67 @@ class CycloneFieldPINN(nn.Module):
         def model_fn(r: torch.Tensor, z: torch.Tensor) -> dict[str, torch.Tensor]:
             return self.forward(r, z, scaler)
         return model_fn
+
+
+def evaluate_grid(
+    model: "CycloneFieldPINN",
+    scaler: FieldScaler,
+    geometry,
+    n_r: int = 40,
+    n_z: int = 60,
+) -> dict[str, list[float]]:
+    """
+    Turns a trained CycloneFieldPINN into a queryable field result: samples
+    a regular (r, z) grid over the fluid domain, evaluates the network at
+    every point, and returns flat parallel lists (r_m, z_m, v_r_ms,
+    v_theta_ms, v_z_ms, pressure_pa) — one entry per grid point that is
+    actually inside the fluid domain.
+
+    Points outside the fluid domain (outside the tapered outer wall, or
+    beyond total_height) are dropped rather than returned as zeros/NaN, so
+    every list is the same length and every entry is a physically valid
+    query point. This is what app.py's /predict_field/status endpoint
+    serializes into FieldResultDto for the .NET client.
+
+    A regular grid (not the random collocation points used during
+    training) is used here because the client needs a queryable, roughly
+    uniform sampling of the field for visualization/analysis — training
+    and evaluation deliberately use different sampling strategies for
+    different purposes.
+    """
+    device = next(model.parameters()).device
+
+    r_lin = torch.linspace(0.0, geometry.r_barrel, n_r, device=device)
+    z_lin = torch.linspace(0.0, geometry.total_height, n_z, device=device)
+    r_grid, z_grid = torch.meshgrid(r_lin, z_lin, indexing="ij")
+    r_flat = r_grid.reshape(-1)
+    z_flat = z_grid.reshape(-1)
+
+    valid = geometry.is_fluid(r_flat, z_flat)
+    r_valid = r_flat[valid]
+    z_valid = z_flat[valid]
+
+    if r_valid.numel() == 0:
+        # Degenerate geometry (shouldn't happen given CycloneAxisymGeometry's
+        # own validation) — return empty lists rather than raising, since the
+        # caller (app.py) already wraps this in a try/except that reports
+        # job failure with a clear message.
+        empty: list[float] = []
+        return {
+            "r_m": empty, "z_m": empty,
+            "v_r_ms": empty, "v_theta_ms": empty, "v_z_ms": empty,
+            "pressure_pa": empty,
+        }
+
+    model.eval()
+    with torch.no_grad():
+        out = model(r_valid, z_valid, scaler)
+
+    return {
+        "r_m": r_valid.cpu().tolist(),
+        "z_m": z_valid.cpu().tolist(),
+        "v_r_ms": out["v_r"].cpu().tolist(),
+        "v_theta_ms": out["v_theta"].cpu().tolist(),
+        "v_z_ms": out["v_z"].cpu().tolist(),
+        "pressure_pa": out["p"].cpu().tolist(),
+    }

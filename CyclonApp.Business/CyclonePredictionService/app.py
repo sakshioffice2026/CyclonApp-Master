@@ -33,6 +33,22 @@ store needs to move to something shared (Redis, a DB table) — not done
 here because it isn't needed yet and would be an unnecessary abstraction
 for the current single-worker deployment.
 
+Job lifecycle / resource limits (added after the initial cut):
+  - MAX_CONCURRENT_FIELD_JOBS caps how many training jobs can run at once.
+    A request past that cap gets an immediate 429, not an unbounded queue
+    of background threads silently competing for CPU — each job is a real
+    training run (thousands of Adam steps + an L-BFGS phase), so letting
+    threads pile up unbounded risks CPU/GPU contention severe enough to
+    make every in-flight job time out rather than failing fast and
+    predictably.
+  - FIELD_JOB_TTL_SECONDS bounds how long a finished (completed/failed)
+    job's result stays in the in-process dict before a periodic sweep
+    evicts it. Without this the dict grows without bound for the life of
+    the process — every job ever started stays in memory forever.
+  - created_at / completed_at timestamps are attached to every job so the
+    client (or future ops tooling) can reason about job age, and so the
+    TTL sweep has something to check against.
+
 C#'s HttpClient.PostAsJsonAsync/ReadFromJsonAsync are called without custom
 JsonSerializerOptions in CyclonePredictionRepository.cs, so System.Text.Json
 uses its *default* options: exact, case-sensitive PascalCase property names,
@@ -64,6 +80,11 @@ app = FastAPI(title="Cyclone Prediction Service (Physics-Informed)")
 
 _model: CyclonePINN | None = None
 _scaler: FeatureScaler | None = None
+
+# Job lifecycle / resource-limit config — see module docstring above.
+MAX_CONCURRENT_FIELD_JOBS = 2
+FIELD_JOB_TTL_SECONDS = 3600  # finished jobs are swept 1 hour after completion
+FIELD_JOB_SWEEP_INTERVAL_SECONDS = 300
 
 
 class PredictionRequest(BaseModel):
@@ -210,11 +231,14 @@ class PredictFieldStatusResponse(BaseModel):
     status: str = Field(alias="Status")  # "running" | "completed" | "failed"
     error_message: Optional[str] = Field(alias="ErrorMessage", default=None)
     result: Optional[FieldResultDto] = Field(alias="Result", default=None)
+    created_at_unix: Optional[float] = Field(alias="CreatedAtUnix", default=None)
+    completed_at_unix: Optional[float] = Field(alias="CompletedAtUnix", default=None)
 
 
 # In-process job store — see production-limitation note in module docstring.
 _field_jobs: dict[str, dict] = {}
 _field_jobs_lock = threading.Lock()
+_field_jobs_running_count = 0  # guarded by _field_jobs_lock
 
 # Training defaults for the on-demand job. Chosen as a starting balance
 # between wait time and convergence quality — validated to run cleanly
@@ -225,6 +249,7 @@ FIELD_JOB_EPOCHS_LBFGS = 300
 
 
 def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
+    global _field_jobs_running_count
     try:
         geometry = geometry_from_dimensions_mm(
             barrel_diameter_mm=req.barrel_diameter_mm,
@@ -249,7 +274,8 @@ def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
 
         def on_progress(epoch, total, loss):
             with _field_jobs_lock:
-                _field_jobs[job_id]["progress"] = f"{epoch}/{total}"
+                if job_id in _field_jobs:
+                    _field_jobs[job_id]["progress"] = f"{epoch}/{total}"
 
         model, scaler, history = train_field_model(
             geometry, rho, nu, v_inlet,
@@ -267,25 +293,92 @@ def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
         )
 
         with _field_jobs_lock:
-            _field_jobs[job_id]["status"] = "completed"
-            _field_jobs[job_id]["result"] = result
+            if job_id in _field_jobs:
+                _field_jobs[job_id]["status"] = "completed"
+                _field_jobs[job_id]["result"] = result
+                _field_jobs[job_id]["completed_at"] = time.time()
 
     except Exception as e:
         with _field_jobs_lock:
-            _field_jobs[job_id]["status"] = "failed"
-            _field_jobs[job_id]["error_message"] = str(e)
+            if job_id in _field_jobs:
+                _field_jobs[job_id]["status"] = "failed"
+                _field_jobs[job_id]["error_message"] = str(e)
+                _field_jobs[job_id]["completed_at"] = time.time()
+
+    finally:
+        # Always release the concurrency slot, even if the job store entry
+        # was already swept out from under us (shouldn't happen given the
+        # TTL is much longer than any realistic training run, but this
+        # must not leak a slot if it ever does).
+        with _field_jobs_lock:
+            _field_jobs_running_count -= 1
+
+
+def _sweep_expired_field_jobs() -> None:
+    """Evicts finished jobs older than FIELD_JOB_TTL_SECONDS from the
+    in-process store, so a long-running service doesn't accumulate every
+    job result ever produced. Runs on a background daemon thread; see
+    _start_field_job_sweeper. Must hold _field_jobs_lock for the whole
+    scan-and-delete to stay consistent with concurrent job starts/updates."""
+    now = time.time()
+    with _field_jobs_lock:
+        expired = [
+            jid for jid, job in _field_jobs.items()
+            if job["status"] in ("completed", "failed")
+            and job.get("completed_at") is not None
+            and (now - job["completed_at"]) > FIELD_JOB_TTL_SECONDS
+        ]
+        for jid in expired:
+            del _field_jobs[jid]
+
+
+def _field_job_sweeper_loop() -> None:
+    while True:
+        time.sleep(FIELD_JOB_SWEEP_INTERVAL_SECONDS)
+        try:
+            _sweep_expired_field_jobs()
+        except Exception:
+            # A sweep failure must never take down the service or stop
+            # future sweeps — worst case is the store grows until the next
+            # successful sweep, which is exactly the pre-TTL behavior.
+            pass
+
+
+def _start_field_job_sweeper() -> None:
+    threading.Thread(target=_field_job_sweeper_loop, daemon=True).start()
+
+
+@app.on_event("startup")
+def start_field_job_sweeper():
+    _start_field_job_sweeper()
 
 
 @app.post("/predict_field/start")
 def predict_field_start(payload: dict) -> PredictFieldStartResponse:
+    global _field_jobs_running_count
+
     try:
         req = PredictFieldStartRequest(**payload)
     except Exception as e:
         raise HTTPException(422, f"Invalid field prediction request: {e}")
 
-    job_id = str(uuid.uuid4())
     with _field_jobs_lock:
-        _field_jobs[job_id] = {"status": "running", "result": None, "error_message": None, "progress": "0/0"}
+        if _field_jobs_running_count >= MAX_CONCURRENT_FIELD_JOBS:
+            raise HTTPException(
+                429,
+                f"Too many field-prediction jobs running "
+                f"(max {MAX_CONCURRENT_FIELD_JOBS}). Try again shortly.",
+            )
+        job_id = str(uuid.uuid4())
+        _field_jobs[job_id] = {
+            "status": "running",
+            "result": None,
+            "error_message": None,
+            "progress": "0/0",
+            "created_at": time.time(),
+            "completed_at": None,
+        }
+        _field_jobs_running_count += 1
 
     thread = threading.Thread(target=_run_field_job, args=(job_id, req), daemon=True)
     thread.start()
@@ -298,10 +391,17 @@ def predict_field_status(job_id: str) -> PredictFieldStatusResponse:
     with _field_jobs_lock:
         job = _field_jobs.get(job_id)
         if job is None:
-            raise HTTPException(404, f"No such job: {job_id}")
+            raise HTTPException(
+                404,
+                f"No such job: {job_id}. It may never have existed, or it "
+                f"finished more than {FIELD_JOB_TTL_SECONDS}s ago and was "
+                f"cleaned up.",
+            )
         return PredictFieldStatusResponse(
             job_id=job_id,
             status=job["status"],
             error_message=job["error_message"],
             result=job["result"],
+            created_at_unix=job.get("created_at"),
+            completed_at_unix=job.get("completed_at"),
         )
