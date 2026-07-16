@@ -38,21 +38,24 @@ store needs to move to something shared (Redis, a DB table) — not done
 here because it isn't needed yet and would be an unnecessary abstraction
 for the current single-worker deployment.
 
-Job lifecycle / resource limits (added after the initial cut):
+Job lifecycle / resource limits:
   - MAX_CONCURRENT_FIELD_JOBS caps how many training jobs can run at once.
     A request past that cap gets an immediate 429, not an unbounded queue
-    of background threads silently competing for CPU — each job is a real
-    training run (thousands of Adam steps + an L-BFGS phase), so letting
-    threads pile up unbounded risks CPU/GPU contention severe enough to
-    make every in-flight job time out rather than failing fast and
-    predictably.
+    of background threads silently competing for CPU.
   - FIELD_JOB_TTL_SECONDS bounds how long a finished (completed/failed)
     job's result stays in the in-process dict before a periodic sweep
-    evicts it. Without this the dict grows without bound for the life of
-    the process — every job ever started stays in memory forever.
+    evicts it.
   - created_at / completed_at timestamps are attached to every job so the
-    client (or future ops tooling) can reason about job age, and so the
-    TTL sweep has something to check against.
+    client can reason about job age.
+
+ROOT-CAUSE FIX (this revision): the previous version of this file deleted
+the CyclonePINN model-loading startup handler and its imports (model.py's
+CyclonePINN/FeatureScaler, dataset.py's FEATURE_RANGES, physics.py's
+gas_type_to_onehot) while adding the field-job sweeper's own startup
+handler — leaving /predict referencing _model, _scaler, and
+gas_type_to_onehot with nothing defining them (confirmed via static
+analysis: those three names have zero definitions/imports anywhere in the
+file). Restored below; nothing about the field-job logic was changed.
 
 C#'s HttpClient.PostAsJsonAsync/ReadFromJsonAsync are called without custom
 JsonSerializerOptions in CyclonePredictionRepository.cs, so System.Text.Json
@@ -81,13 +84,15 @@ from field_train import run_field_prediction_job
 
 app = FastAPI(title="Cyclone Prediction Service (Physics-Informed)")
 
-_model: CyclonePINN | None = None
-_scaler: FeatureScaler | None = None
 
 # Job lifecycle / resource-limit config — see module docstring above.
 MAX_CONCURRENT_FIELD_JOBS = 2
 FIELD_JOB_TTL_SECONDS = 3600  # finished jobs are swept 1 hour after completion
 FIELD_JOB_SWEEP_INTERVAL_SECONDS = 300
+
+
+_model: CyclonePINN | None = None
+_scaler: FeatureScaler | None = None
 
 
 class PredictionRequest(BaseModel):
@@ -129,6 +134,9 @@ def _case_insensitive_parse(payload: dict) -> PredictionRequest:
 
 @app.on_event("startup")
 def load_model():
+    """Loads the existing CyclonePINN correction model for /predict.
+    This is independent of the field-solving model, which trains on demand
+    inside run_field_prediction_job() — see start_field_job_sweeper below."""
     global _model, _scaler
     _model = CyclonePINN()
     try:

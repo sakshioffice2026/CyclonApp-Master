@@ -35,6 +35,22 @@ stream of training data over the domain) and also directly implements
 "bigger collocation batch per step": n_interior below is intentionally
 larger than a token/minimal batch so each gradient step sees good domain
 coverage.
+
+TURBULENCE INTEGRATION (this revision — root-cause fix):
+Previously this file called field_physics.navier_stokes_residuals (laminar
+only) and field_boundary_conditions.assemble_bc_losses with the old
+(v_inlet)-only signature, while field_model.CycloneFieldPINN already
+outputs k/eps and field_boundary_conditions.py already requires
+(v_inlet, k_inlet, eps_inlet). That mismatch crashed with:
+    TypeError: assemble_bc_losses() missing 2 required positional
+    arguments: 'k_inlet' and 'eps_inlet'
+— and even past that crash, training was still laminar underneath, since
+navier_stokes_residuals never reads the network's k/eps outputs or applies
+the Boussinesq eddy-viscosity correction. Fixed below by switching to
+field_turbulence.rans_field_residuals for the PDE residual and computing
+k_inlet/eps_inlet via field_turbulence.inlet_turbulence_quantities, so the
+turbulence closure that field_model.py and field_boundary_conditions.py
+were already built for is actually exercised during training.
 """
 from __future__ import annotations
 
@@ -46,40 +62,50 @@ import torch
 from field_model import CycloneFieldPINN, FieldScaler, evaluate_grid
 from field_physics import (
     CycloneAxisymGeometry,
-    navier_stokes_residuals,
     geometry_from_dimensions_mm,
     fluid_properties,
     inlet_velocity_ms,
+)
+from field_turbulence import (
+    rans_field_residuals,
+    inlet_turbulence_quantities,
+    hydraulic_diameter_rect_m,
 )
 from field_boundary_conditions import assemble_bc_losses
 from physics import gas_type_to_onehot
 
 # ─────────────────────────────────────────────────────────────────────────
-# Loss term weights. PDE residuals and BC residuals are not naturally on
-# the same scale (BC residuals are direct velocity/pressure errors; PDE
-# residuals involve second derivatives and can dominate numerically if
-# left unweighted). These weights are a starting point validated to
-# produce stable, convergent training — not claimed optimal for every
-# geometry; revisit if a particular design shape trains poorly.
+# Loss term weights. PDE residuals, BC residuals, and now the k/epsilon
+# transport-equation residuals are not naturally on the same scale (BC
+# residuals are direct velocity/pressure/turbulence errors; PDE and
+# turbulence-equation residuals involve second derivatives and can dominate
+# numerically if left unweighted). These weights are a starting point
+# carried over from the laminar-only version — PDE_LOSS_WEIGHT/
+# BC_LOSS_WEIGHT were validated stable for the laminar case; TURB_LOSS_WEIGHT
+# is a first guess, NOT yet empirically validated the way the other two
+# were, since this is the first revision that actually exercises the
+# k/epsilon equations. Revisit if turbulence quantities fail to converge
+# or dominate/get swamped by the momentum terms.
 # ─────────────────────────────────────────────────────────────────────────
 PDE_LOSS_WEIGHT = 1.0
+TURB_LOSS_WEIGHT = 1.0
 BC_LOSS_WEIGHT = 10.0
 
 OnProgressFn = Callable[[int, int, float], None]
 
-# navier_stokes_residuals divides by r^2 (with only a 1e-9 numerical floor)
-# in the r- and theta-momentum residuals. geometry.sample_interior draws r
-# uniformly across the full [0, wall_r] range, so with realistic batch
-# sizes some points land within microns of the axis, producing 1/r^2 terms
-# in the billions that swamp the loss and destabilize both the Adam and
-# L-BFGS phases (confirmed empirically: min r in a 2000-point batch was
+# rans_field_residuals divides by r and r^2 (with only a 1e-9 numerical
+# floor) in the r- and theta-momentum residuals. geometry.sample_interior
+# draws r uniformly across the full [0, wall_r] range, so with realistic
+# batch sizes some points land within microns of the axis, producing 1/r^2
+# terms in the billions that swamp the loss and destabilize both the Adam
+# and L-BFGS phases (confirmed empirically: min r in a 2000-point batch was
 # ~6e-6 m, giving a 1/r^2 term of ~3e10). The axis itself is already
 # covered by the dedicated axis boundary condition
 # (geometry.sample_axis + field_boundary_conditions.axis_symmetry_residual,
-# enforcing v_r=0, v_theta=0, d(v_z)/dr=0), so excluding a thin band around
-# r=0 from interior PDE sampling loses no physics coverage — it just keeps
-# collocation points out of a region already handled by a different, more
-# numerically appropriate constraint.
+# enforcing v_r=0, v_theta=0, d(v_z)/dr=0, d(k)/dr=0, d(eps)/dr=0), so
+# excluding a thin band around r=0 from interior PDE sampling loses no
+# physics coverage — it just keeps collocation points out of a region
+# already handled by a different, more numerically appropriate constraint.
 AXIS_EXCLUSION_FRAC = 0.01  # exclude r < 1% of the barrel radius
 
 
@@ -117,30 +143,35 @@ def _sample_interior_away_from_axis(
     return r_cat, z_cat
 
 
-def _pde_loss(model_fn, geometry: CycloneAxisymGeometry, rho: torch.Tensor,
-              nu: torch.Tensor, n_interior: int, device: str) -> torch.Tensor:
+def _pde_and_turb_loss(model_fn, geometry: CycloneAxisymGeometry, rho: torch.Tensor,
+                        nu: torch.Tensor, n_interior: int, device: str) -> torch.Tensor:
     r, z = _sample_interior_away_from_axis(geometry, n_interior, device)
-    res = navier_stokes_residuals(model_fn, r, z, rho, nu)
-    return (
+    res = rans_field_residuals(model_fn, r, z, rho, nu)
+    pde = (
         (res["continuity"] ** 2).mean()
         + (res["r_momentum"] ** 2).mean()
         + (res["theta_momentum"] ** 2).mean()
         + (res["z_momentum"] ** 2).mean()
     )
+    turb = (
+        (res["k_equation"] ** 2).mean()
+        + (res["eps_equation"] ** 2).mean()
+    )
+    return PDE_LOSS_WEIGHT * pde + TURB_LOSS_WEIGHT * turb
 
 
 def _bc_loss(model_fn, geometry: CycloneAxisymGeometry, v_inlet: torch.Tensor,
-             device: str) -> torch.Tensor:
-    bc_losses = assemble_bc_losses(model_fn, geometry, v_inlet, device=device)
+             k_inlet: torch.Tensor, eps_inlet: torch.Tensor, device: str) -> torch.Tensor:
+    bc_losses = assemble_bc_losses(model_fn, geometry, v_inlet, k_inlet, eps_inlet, device=device)
     return sum(bc_losses.values())
 
 
-def _total_loss(model, scaler, geometry, rho, nu, v_inlet,
+def _total_loss(model, scaler, geometry, rho, nu, v_inlet, k_inlet, eps_inlet,
                  n_interior: int, device: str) -> torch.Tensor:
     model_fn = model.as_model_fn(scaler)
-    pde = _pde_loss(model_fn, geometry, rho, nu, n_interior, device)
-    bc = _bc_loss(model_fn, geometry, v_inlet, device)
-    return PDE_LOSS_WEIGHT * pde + BC_LOSS_WEIGHT * bc
+    pde_turb = _pde_and_turb_loss(model_fn, geometry, rho, nu, n_interior, device)
+    bc = _bc_loss(model_fn, geometry, v_inlet, k_inlet, eps_inlet, device)
+    return pde_turb + BC_LOSS_WEIGHT * bc
 
 
 def train_field_model(
@@ -148,6 +179,8 @@ def train_field_model(
     rho: float,
     nu: float,
     v_inlet: float,
+    k_inlet: float,
+    eps_inlet: float,
     epochs_adam: int = 3000,
     epochs_lbfgs: int = 300,
     n_interior: int = 2048,
@@ -163,12 +196,16 @@ def train_field_model(
     progress_every: int = 25,
 ) -> tuple[CycloneFieldPINN, FieldScaler, dict]:
     """
-    Trains a fresh CycloneFieldPINN for one fixed geometry/operating point.
+    Trains a fresh CycloneFieldPINN (velocity/pressure/k/epsilon) for one
+    fixed geometry/operating point, using the RANS (Launder-Sharma
+    k-epsilon) closure in field_turbulence.py.
 
     Args:
         geometry: fluid domain (see field_physics.geometry_from_dimensions_mm)
-        rho, nu: fluid density (kg/m3) and kinematic viscosity (m2/s)
+        rho, nu: fluid density (kg/m3) and kinematic (molecular) viscosity (m2/s)
         v_inlet: inlet tangential velocity (m/s), see field_physics.inlet_velocity_ms
+        k_inlet, eps_inlet: inlet turbulence kinetic energy (m2/s2) and
+            dissipation rate (m2/s3), see field_turbulence.inlet_turbulence_quantities
         epochs_adam: Adam phase epoch count
         epochs_lbfgs: L-BFGS fine-tune phase step count
         n_interior: PDE collocation points sampled fresh every epoch
@@ -197,6 +234,8 @@ def train_field_model(
     rho_t = torch.as_tensor(float(rho), device=device)
     nu_t = torch.as_tensor(float(nu), device=device)
     v_inlet_t = torch.as_tensor(float(v_inlet), device=device)
+    k_inlet_t = torch.as_tensor(float(k_inlet), device=device)
+    eps_inlet_t = torch.as_tensor(float(eps_inlet), device=device)
 
     length_scale = geometry.r_barrel
     velocity_scale = max(float(v_inlet), 1e-6)
@@ -218,7 +257,8 @@ def train_field_model(
 
     for epoch in range(1, epochs_adam + 1):
         optimizer.zero_grad(set_to_none=True)
-        loss = _total_loss(model, scaler, geometry, rho_t, nu_t, v_inlet_t, n_interior, device)
+        loss = _total_loss(model, scaler, geometry, rho_t, nu_t, v_inlet_t,
+                            k_inlet_t, eps_inlet_t, n_interior, device)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
         optimizer.step()
@@ -248,15 +288,21 @@ def train_field_model(
     def closure():
         optimizer_lbfgs.zero_grad(set_to_none=True)
         model_fn = model.as_model_fn(scaler)
-        pde = navier_stokes_residuals(model_fn, r_fixed, z_fixed, rho_t, nu_t)
-        pde_loss = (
-            (pde["continuity"] ** 2).mean()
-            + (pde["r_momentum"] ** 2).mean()
-            + (pde["theta_momentum"] ** 2).mean()
-            + (pde["z_momentum"] ** 2).mean()
+        res = rans_field_residuals(model_fn, r_fixed, z_fixed, rho_t, nu_t)
+        pde_turb_loss = (
+            PDE_LOSS_WEIGHT * (
+                (res["continuity"] ** 2).mean()
+                + (res["r_momentum"] ** 2).mean()
+                + (res["theta_momentum"] ** 2).mean()
+                + (res["z_momentum"] ** 2).mean()
+            )
+            + TURB_LOSS_WEIGHT * (
+                (res["k_equation"] ** 2).mean()
+                + (res["eps_equation"] ** 2).mean()
+            )
         )
-        bc = _bc_loss(model_fn, geometry, v_inlet_t, device)
-        loss = PDE_LOSS_WEIGHT * pde_loss + BC_LOSS_WEIGHT * bc
+        bc = _bc_loss(model_fn, geometry, v_inlet_t, k_inlet_t, eps_inlet_t, device)
+        loss = pde_turb_loss + BC_LOSS_WEIGHT * bc
         loss.backward()
         closure_history["losses"].append(float(loss.item()))
         return loss
@@ -300,9 +346,10 @@ def train_field_model(
 # process conditions, exactly what PredictFieldStartRequest/the CLI accept)
 # into a trained field and a queryable grid. app.py's _run_field_job and
 # the CLI entry point below both call this — the glue (geometry_from_
-# dimensions_mm -> fluid_properties -> inlet_velocity_ms) previously lived
-# only inline in app.py; it is factored out here so there is exactly one
-# implementation for both callers to stay in sync with.
+# dimensions_mm -> fluid_properties -> inlet_velocity_ms -> inlet
+# turbulence quantities) previously lived only inline in app.py; it is
+# factored out here so there is exactly one implementation for both callers
+# to stay in sync with.
 
 def run_field_prediction_job(
     barrel_diameter_mm: float,
@@ -323,16 +370,19 @@ def run_field_prediction_job(
     **train_kwargs,
 ) -> dict:
     """
-    End-to-end: geometry + fluid properties + inlet velocity -> train ->
-    evaluate on a grid. Takes exactly the field set app.py's
-    PredictFieldStartRequest and the CLI both expose, so both callers can
-    pass their parsed request straight through without any per-caller glue.
+    End-to-end: geometry + fluid properties + inlet velocity + inlet
+    turbulence quantities -> train -> evaluate on a grid. Takes exactly the
+    field set app.py's PredictFieldStartRequest and the CLI both expose, so
+    both callers can pass their parsed request straight through without any
+    per-caller glue.
 
     Args:
         barrel_diameter_mm..bottom_outlet_mm: geometry, see
             field_physics.geometry_from_dimensions_mm
         inlet_height_mm, inlet_width_mm, flow_rate_cfm: inlet sizing/flow,
-            see field_physics.inlet_velocity_ms
+            see field_physics.inlet_velocity_ms and
+            field_turbulence.hydraulic_diameter_rect_m /
+            inlet_turbulence_quantities
         operating_temp_c, operating_press_kpa, gas_type: process conditions,
             see field_physics.fluid_properties / physics.gas_type_to_onehot
         epochs_adam, epochs_lbfgs: forwarded to train_field_model
@@ -343,8 +393,9 @@ def run_field_prediction_job(
     Returns:
         dict with keys:
             geometry (CycloneAxisymGeometry), rho (float), nu (float),
-            v_inlet (float), model (CycloneFieldPINN, eval mode),
-            scaler (FieldScaler), history (dict, see train_field_model),
+            v_inlet (float), k_inlet (float), eps_inlet (float),
+            model (CycloneFieldPINN, eval mode), scaler (FieldScaler),
+            history (dict, see train_field_model),
             grid (dict: r_m/z_m/v_r_ms/v_theta_ms/v_z_ms/pressure_pa lists)
     """
     geometry = geometry_from_dimensions_mm(
@@ -370,8 +421,18 @@ def run_field_prediction_job(
         torch.tensor([inlet_width_mm * 1e-3]),
     ).item()
 
+    hydraulic_diameter_m = hydraulic_diameter_rect_m(
+        height_m=inlet_height_mm * 1e-3, width_m=inlet_width_mm * 1e-3,
+    )
+    k_inlet_t, eps_inlet_t = inlet_turbulence_quantities(
+        v_inlet=torch.tensor([v_inlet]),
+        hydraulic_diameter_m=torch.tensor([hydraulic_diameter_m]),
+        nu=torch.tensor([nu]),
+    )
+    k_inlet, eps_inlet = k_inlet_t.item(), eps_inlet_t.item()
+
     model, scaler, history = train_field_model(
-        geometry, rho, nu, v_inlet,
+        geometry, rho, nu, v_inlet, k_inlet, eps_inlet,
         epochs_adam=epochs_adam,
         epochs_lbfgs=epochs_lbfgs,
         on_progress=on_progress,
@@ -385,6 +446,8 @@ def run_field_prediction_job(
         "rho": rho,
         "nu": nu,
         "v_inlet": v_inlet,
+        "k_inlet": k_inlet,
+        "eps_inlet": eps_inlet,
         "model": model,
         "scaler": scaler,
         "history": history,
@@ -495,6 +558,7 @@ def main(argv: Optional[list] = None) -> None:
     print("\n── Done ──────────────────────────────────────────────")
     print(f"rho={result['rho']:.5f} kg/m3  nu={result['nu']:.3e} m2/s  "
           f"v_inlet={result['v_inlet']:.4f} m/s")
+    print(f"k_inlet={result['k_inlet']:.5e} m2/s2  eps_inlet={result['eps_inlet']:.5e} m2/s3")
     print(f"final_loss={history['final_loss']:.6e}  "
           f"wall_time_s={history['wall_time_s']:.1f}")
     print(f"grid points evaluated: {len(grid['r_m'])}")
@@ -505,6 +569,8 @@ def main(argv: Optional[list] = None) -> None:
             "rho_kgm3": result["rho"],
             "nu_m2s": result["nu"],
             "v_inlet_ms": result["v_inlet"],
+            "k_inlet": result["k_inlet"],
+            "eps_inlet": result["eps_inlet"],
             "final_loss": history["final_loss"],
             "wall_time_s": history["wall_time_s"],
             "grid": grid,
