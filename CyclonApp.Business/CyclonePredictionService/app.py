@@ -25,6 +25,11 @@ geometry/operating-point (see field_train.py docstring) — a full physics
 solve takes real minutes, not milliseconds, so this cannot be a synchronous
 request the way /predict is. The client starts a job, polls status.
 
+The geometry/fluid-property glue and the train+evaluate pipeline live in
+field_train.run_field_prediction_job — the single shared implementation
+also used by field_train.py's CLI (`python field_train.py ...`), so offline
+tuning and the live service can never drift apart.
+
 Known production limitation, stated plainly: the job store below is an
 in-process dict. It does not survive a service restart and does not work
 across multiple uvicorn worker processes. Fine for a single-worker
@@ -72,9 +77,7 @@ from model import CyclonePINN, FeatureScaler, RAW_FEATURES
 from dataset import FEATURE_RANGES
 from physics import gas_type_to_onehot
 
-from field_physics import geometry_from_dimensions_mm, fluid_properties, inlet_velocity_ms
-from field_model import evaluate_grid
-from field_train import train_field_model
+from field_train import run_field_prediction_job
 
 app = FastAPI(title="Cyclone Prediction Service (Physics-Informed)")
 
@@ -251,51 +254,41 @@ FIELD_JOB_EPOCHS_LBFGS = 300
 def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
     global _field_jobs_running_count
     try:
-        geometry = geometry_from_dimensions_mm(
+        def on_progress(epoch, total, loss):
+            with _field_jobs_lock:
+                if job_id in _field_jobs:
+                    _field_jobs[job_id]["progress"] = f"{epoch}/{total}"
+
+        result = run_field_prediction_job(
             barrel_diameter_mm=req.barrel_diameter_mm,
             barrel_height_mm=req.barrel_height_mm,
             cone_height_mm=req.cone_height_mm,
             exhaust_dia_mm=req.exhaust_dia_mm,
             exhaust_length_mm=req.exhaust_length_mm,
             bottom_outlet_mm=req.bottom_outlet_mm,
-        )
-        gas_onehot = torch.tensor([gas_type_to_onehot(req.gas_type)])
-        rho_t, nu_t = fluid_properties(
-            torch.tensor([req.operating_temp_c]),
-            torch.tensor([req.operating_press_kpa]),
-            gas_onehot,
-        )
-        rho, nu = rho_t.item(), nu_t.item()
-        v_inlet = inlet_velocity_ms(
-            torch.tensor([req.flow_rate_cfm]),
-            torch.tensor([req.inlet_height_mm * 1e-3]),
-            torch.tensor([req.inlet_width_mm * 1e-3]),
-        ).item()
-
-        def on_progress(epoch, total, loss):
-            with _field_jobs_lock:
-                if job_id in _field_jobs:
-                    _field_jobs[job_id]["progress"] = f"{epoch}/{total}"
-
-        model, scaler, history = train_field_model(
-            geometry, rho, nu, v_inlet,
+            inlet_height_mm=req.inlet_height_mm,
+            inlet_width_mm=req.inlet_width_mm,
+            flow_rate_cfm=req.flow_rate_cfm,
+            operating_temp_c=req.operating_temp_c,
+            operating_press_kpa=req.operating_press_kpa,
+            gas_type=req.gas_type,
             epochs_adam=FIELD_JOB_EPOCHS_ADAM,
             epochs_lbfgs=FIELD_JOB_EPOCHS_LBFGS,
             on_progress=on_progress,
         )
 
-        grid = evaluate_grid(model, scaler, geometry)
-        result = FieldResultDto(
+        grid = result["grid"]
+        field_result = FieldResultDto(
             r_m=grid["r_m"], z_m=grid["z_m"],
             v_r_ms=grid["v_r_ms"], v_theta_ms=grid["v_theta_ms"],
             v_z_ms=grid["v_z_ms"], pressure_pa=grid["pressure_pa"],
-            rho_kgm3=rho, nu_m2s=nu, v_inlet_ms=v_inlet,
+            rho_kgm3=result["rho"], nu_m2s=result["nu"], v_inlet_ms=result["v_inlet"],
         )
 
         with _field_jobs_lock:
             if job_id in _field_jobs:
                 _field_jobs[job_id]["status"] = "completed"
-                _field_jobs[job_id]["result"] = result
+                _field_jobs[job_id]["result"] = field_result
                 _field_jobs[job_id]["completed_at"] = time.time()
 
     except Exception as e:

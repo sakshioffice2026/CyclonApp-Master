@@ -311,6 +311,96 @@
 
 </div>
 
+<!-- ── Physics Field Solve (async job, velocity/pressure field) ────────── -->
+<div class="row g-4 mt-1">
+    <div class="col-12">
+        <div class="card" id="fieldSolveCard">
+            <form id="fieldSolveAntiForgeryForm" class="d-none">@Html.AntiForgeryToken()</form>
+            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-wind me-2 text-info"></i>Physics Field Solve
+                </h5>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="badge d-none" id="fieldSolveStatusBadge"></span>
+                    <button type="button" class="btn btn-primary btn-sm" id="btnStartFieldSolve"
+                            data-revision-id="@Model.RevisionId">
+                        <i class="bi bi-cpu me-1"></i>Run Field Solve
+                    </button>
+                </div>
+            </div>
+            <div class="card-body">
+                <p class="text-muted mb-3" style="font-size:12.5px;">
+                    Trains a physics-informed network for the full velocity/pressure field
+                    (v<sub>r</sub>, v<sub>θ</sub>, v<sub>z</sub>, p) across this exact geometry and
+                    operating point. Unlike the AI-assisted estimate above, this is a real numerical
+                    solve — it typically takes a few minutes, and at most a couple can run at once
+                    across all users.
+                </p>
+
+                <div id="fieldSolveIdle" style="font-size:12.5px;color:var(--text-muted);">
+                    Not run for this revision yet.
+                </div>
+
+                <div id="fieldSolveRunning" class="d-none">
+                    <div class="d-flex align-items-center gap-2 mb-2">
+                        <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+                        <span style="font-size:12.5px;">Training in progress — this updates automatically, no need to refresh.</span>
+                    </div>
+                </div>
+
+                <div id="fieldSolveError" class="d-none p-2 mb-2"
+                     style="background:#fee2e2;border:1px solid #fca5a5;border-radius:6px;font-size:12.5px;color:#dc2626;"></div>
+
+                <div id="fieldSolveResult" class="d-none">
+                    <div class="row g-3 mb-3">
+                        <div class="col-6 col-md-3">
+                            <div class="kpi-card">
+                                <div class="kpi-label">Gas Density</div>
+                                <div class="kpi-value" style="font-size:18px;" id="fsRho">—</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="kpi-card">
+                                <div class="kpi-label">Kinematic Viscosity</div>
+                                <div class="kpi-value" style="font-size:18px;" id="fsNu">—</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="kpi-card">
+                                <div class="kpi-label">Inlet Velocity</div>
+                                <div class="kpi-value" style="font-size:18px;" id="fsVInlet">—</div>
+                            </div>
+                        </div>
+                        <div class="col-6 col-md-3">
+                            <div class="kpi-card">
+                                <div class="kpi-label">Grid Points</div>
+                                <div class="kpi-value" style="font-size:18px;" id="fsPoints">—</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="d-flex align-items-center gap-2 mb-2">
+                        <span style="font-size:12.5px;font-weight:600;color:var(--text-muted);">Field:</span>
+                        <select class="form-select form-select-sm" id="fieldSelect" style="width:auto;">
+                            <option value="pressurePa">Pressure (Pa)</option>
+                            <option value="vThetaMs">Tangential Velocity v_θ (m/s)</option>
+                            <option value="vRMs">Radial Velocity v_r (m/s)</option>
+                            <option value="vZMs">Axial Velocity v_z (m/s)</option>
+                        </select>
+                    </div>
+                    <div style="height:420px;">
+                        <canvas id="fieldChart"></canvas>
+                    </div>
+                    <p class="text-muted mt-2 mb-0" style="font-size:11px;">
+                        Axisymmetric cross-section: horizontal = radius from centerline r (m), vertical = height
+                        from top of barrel z (m). Each point is a solved grid location, colored by the selected field.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- ── AI-Assisted Prediction (not yet generated — stays at bottom as a prompt) ── -->
 <div class="row g-4 mt-1">
     <div class="col-12">
@@ -853,6 +943,232 @@
                 }
             );
 
+        })();
+    </script>
+    <script>
+        (function () {
+            const btn = document.getElementById('btnStartFieldSolve');
+            if (!btn) return;
+
+            const revisionId   = btn.dataset.revisionId;
+            const idleEl       = document.getElementById('fieldSolveIdle');
+            const runningEl    = document.getElementById('fieldSolveRunning');
+            const errorEl      = document.getElementById('fieldSolveError');
+            const resultEl     = document.getElementById('fieldSolveResult');
+            const badgeEl      = document.getElementById('fieldSolveStatusBadge');
+            const fieldSelect  = document.getElementById('fieldSelect');
+
+            const POLL_INTERVAL_MS = 4000;
+            const MAX_POLL_MS      = 15 * 60 * 1000; // stop polling politely after 15 min
+            let pollTimer     = null;
+            let pollStartedAt = null;
+            let lastResult    = null;
+            let fieldChart    = null;
+
+            // Field labels for the chart legend/tooltip — keys match the
+            // pinned JSON property names on FieldResultDto exactly.
+            const FIELD_LABELS = {
+                pressurePa: 'Pressure (Pa)',
+                vThetaMs:   'Tangential Velocity v_θ (m/s)',
+                vRMs:       'Radial Velocity v_r (m/s)',
+                vZMs:       'Axial Velocity v_z (m/s)',
+            };
+
+            function getAntiForgeryToken() {
+                const input = document.querySelector(
+                    '#fieldSolveAntiForgeryForm input[name="__RequestVerificationToken"]');
+                return input ? input.value : null;
+            }
+
+            function showState(state) {
+                idleEl.classList.toggle('d-none', state !== 'idle');
+                runningEl.classList.toggle('d-none', state !== 'running');
+                errorEl.classList.toggle('d-none', state !== 'error');
+                resultEl.classList.toggle('d-none', state !== 'completed');
+            }
+
+            function setBadge(text, bg, fg) {
+                if (!text) { badgeEl.classList.add('d-none'); return; }
+                badgeEl.textContent = text;
+                badgeEl.style.background = bg;
+                badgeEl.style.color = fg;
+                badgeEl.style.border = '1px solid ' + fg;
+                badgeEl.classList.remove('d-none');
+            }
+
+            function stopPolling() {
+                if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+            }
+
+            function showError(message) {
+                errorEl.textContent = message;
+                showState('error');
+                setBadge('Failed', '#fee2e2', '#dc2626');
+                btn.disabled = false;
+            }
+
+            async function parseErrorBody(resp) {
+                try { return await resp.json(); } catch { return {}; }
+            }
+
+            async function startFieldSolve() {
+                stopPolling();
+                errorEl.classList.add('d-none');
+                btn.disabled = true;
+                setBadge('Starting…', '#e0e7ff', '#4338ca');
+
+                const token = getAntiForgeryToken();
+                const form = new FormData();
+                if (token) form.append('__RequestVerificationToken', token);
+
+                try {
+                    const resp = await fetch(`/Design/StartFieldPrediction/${revisionId}`, {
+                        method: 'POST',
+                        body: form,
+                    });
+
+                    if (resp.status === 429) {
+                        const body = await parseErrorBody(resp);
+                        showError(body.error || 'Too many field-prediction jobs running. Try again shortly.');
+                        setBadge(null);
+                        return;
+                    }
+                    if (!resp.ok) {
+                        const body = await parseErrorBody(resp);
+                        showError(body.error || 'Could not start the field solve.');
+                        setBadge(null);
+                        return;
+                    }
+
+                    const data = await resp.json();
+                    showState('running');
+                    setBadge('Running', '#dbeafe', '#1d4ed8');
+                    pollStartedAt = Date.now();
+                    pollStatus(data.jobId);
+                } catch (e) {
+                    showError('Could not reach the field prediction service.');
+                    setBadge(null);
+                }
+            }
+
+            async function pollStatus(jobId) {
+                stopPolling();
+
+                if (Date.now() - pollStartedAt > MAX_POLL_MS) {
+                    showError('This is taking longer than expected. Check back later or try again.');
+                    return;
+                }
+
+                try {
+                    const resp = await fetch(`/Design/FieldPredictionStatus?jobId=${encodeURIComponent(jobId)}`);
+
+                    if (resp.status === 404) {
+                        showError('Job expired before it finished. Please try again.');
+                        return;
+                    }
+                    if (!resp.ok) {
+                        const body = await parseErrorBody(resp);
+                        showError(body.error || 'Lost contact with the field prediction service.');
+                        return;
+                    }
+
+                    const status = await resp.json();
+
+                    if (status.status === 'running') {
+                        pollTimer = setTimeout(() => pollStatus(jobId), POLL_INTERVAL_MS);
+                        return;
+                    }
+
+                    if (status.status === 'failed') {
+                        showError(status.errorMessage || 'The field solve failed.');
+                        return;
+                    }
+
+                    // completed
+                    renderResult(status);
+                    btn.disabled = false;
+                    setBadge('Completed', '#dcfce7', '#16a34a');
+                } catch (e) {
+                    // Transient network hiccup — keep polling rather than giving up.
+                    pollTimer = setTimeout(() => pollStatus(jobId), POLL_INTERVAL_MS);
+                }
+            }
+
+            function renderResult(status) {
+                const r = status.result;
+                if (!r) { showError('Completed with no result data.'); return; }
+
+                lastResult = r;
+                document.getElementById('fsRho').textContent    = r.rhoKgm3.toFixed(4) + ' kg/m³';
+                document.getElementById('fsNu').textContent      = r.nuM2s.toExponential(3) + ' m²/s';
+                document.getElementById('fsVInlet').textContent  = r.vInletMs.toFixed(2) + ' m/s';
+                document.getElementById('fsPoints').textContent  = r.rMeters.length.toLocaleString();
+
+                showState('completed');
+                drawFieldChart(fieldSelect.value);
+            }
+
+            function colorForValue(value, min, max) {
+                const t = max > min ? (value - min) / (max - min) : 0.5;
+                // Simple blue (low) -> red (high) ramp — no external colormap
+                // library needed for a scatter of a few thousand points.
+                const r = Math.round(255 * t);
+                const b = Math.round(255 * (1 - t));
+                return `rgb(${r},70,${b})`;
+            }
+
+            function drawFieldChart(fieldKey) {
+                if (!lastResult) return;
+                const values = lastResult[fieldKey];
+                if (!values) return;
+
+                const min = Math.min(...values);
+                const max = Math.max(...values);
+
+                const points = lastResult.rMeters.map((rVal, i) => ({
+                    x: rVal,
+                    y: lastResult.zMeters[i],
+                    v: values[i],
+                }));
+                const colors = points.map(p => colorForValue(p.v, min, max));
+
+                const ctx = document.getElementById('fieldChart').getContext('2d');
+                if (fieldChart) fieldChart.destroy();
+                fieldChart = new Chart(ctx, {
+                    type: 'scatter',
+                    data: {
+                        datasets: [{
+                            label: FIELD_LABELS[fieldKey] || fieldKey,
+                            data: points,
+                            pointBackgroundColor: colors,
+                            pointRadius: 3,
+                            pointHoverRadius: 5,
+                        }],
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: { title: { display: true, text: 'r — radius (m)', font: { size: 11 } } },
+                            // z is measured from the top of the barrel downward
+                            // (see field_physics.py) — reverse so "up" on the
+                            // chart matches "up" in the physical cyclone.
+                            y: { reverse: true, title: { display: true, text: 'z — height from top (m)', font: { size: 11 } } },
+                        },
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                callbacks: {
+                                    label: (c) => `r=${c.raw.x.toFixed(3)}m  z=${c.raw.y.toFixed(3)}m  ${FIELD_LABELS[fieldKey] || fieldKey}=${c.raw.v.toFixed(3)}`,
+                                },
+                            },
+                        },
+                    },
+                });
+            }
+
+            fieldSelect.addEventListener('change', (e) => drawFieldChart(e.target.value));
+            btn.addEventListener('click', startFieldSolve);
         })();
     </script>
 }

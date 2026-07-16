@@ -3,9 +3,10 @@ field_train.py
 ────────────────
 Reusable training routine for CycloneFieldPINN. This is the SINGLE source
 of truth for training the field-solving model — both the CLI entry point
-(`python field_train.py ...`, if/when one is added) and app.py's async
-/predict_field job call the same `train_field_model` function. Do not
-duplicate this loop anywhere else.
+(`python field_train.py ...`, see bottom of this file) and app.py's async
+/predict_field job call the same `run_field_prediction_job` /
+`train_field_model` functions. Do not duplicate this loop, or the
+geometry/fluid-property glue in `run_field_prediction_job`, anywhere else.
 
 Why train-on-demand: CycloneFieldPINN takes only (r, z) as input, with
 geometry and operating condition baked in as fixed constants at training
@@ -42,9 +43,16 @@ from typing import Callable, Optional
 
 import torch
 
-from field_model import CycloneFieldPINN, FieldScaler
-from field_physics import CycloneAxisymGeometry, navier_stokes_residuals
+from field_model import CycloneFieldPINN, FieldScaler, evaluate_grid
+from field_physics import (
+    CycloneAxisymGeometry,
+    navier_stokes_residuals,
+    geometry_from_dimensions_mm,
+    fluid_properties,
+    inlet_velocity_ms,
+)
 from field_boundary_conditions import assemble_bc_losses
+from physics import gas_type_to_onehot
 
 # ─────────────────────────────────────────────────────────────────────────
 # Loss term weights. PDE residuals and BC residuals are not naturally on
@@ -283,3 +291,228 @@ def train_field_model(
     }
 
     return model, scaler, history
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# SHARED ORCHESTRATION — geometry/fluid-property glue + train + evaluate
+# ─────────────────────────────────────────────────────────────────────────
+# This is the SINGLE place that turns raw request fields (mm dimensions +
+# process conditions, exactly what PredictFieldStartRequest/the CLI accept)
+# into a trained field and a queryable grid. app.py's _run_field_job and
+# the CLI entry point below both call this — the glue (geometry_from_
+# dimensions_mm -> fluid_properties -> inlet_velocity_ms) previously lived
+# only inline in app.py; it is factored out here so there is exactly one
+# implementation for both callers to stay in sync with.
+
+def run_field_prediction_job(
+    barrel_diameter_mm: float,
+    barrel_height_mm: float,
+    cone_height_mm: float,
+    exhaust_dia_mm: float,
+    exhaust_length_mm: float,
+    bottom_outlet_mm: float,
+    inlet_height_mm: float,
+    inlet_width_mm: float,
+    flow_rate_cfm: float,
+    operating_temp_c: float = 25.0,
+    operating_press_kpa: float = 101.325,
+    gas_type: str = "Air",
+    epochs_adam: int = 3000,
+    epochs_lbfgs: int = 300,
+    on_progress: Optional[OnProgressFn] = None,
+    **train_kwargs,
+) -> dict:
+    """
+    End-to-end: geometry + fluid properties + inlet velocity -> train ->
+    evaluate on a grid. Takes exactly the field set app.py's
+    PredictFieldStartRequest and the CLI both expose, so both callers can
+    pass their parsed request straight through without any per-caller glue.
+
+    Args:
+        barrel_diameter_mm..bottom_outlet_mm: geometry, see
+            field_physics.geometry_from_dimensions_mm
+        inlet_height_mm, inlet_width_mm, flow_rate_cfm: inlet sizing/flow,
+            see field_physics.inlet_velocity_ms
+        operating_temp_c, operating_press_kpa, gas_type: process conditions,
+            see field_physics.fluid_properties / physics.gas_type_to_onehot
+        epochs_adam, epochs_lbfgs: forwarded to train_field_model
+        on_progress: forwarded to train_field_model
+        **train_kwargs: any other train_field_model kwarg (n_interior,
+            hidden, n_layers, lr_adam_start, ..., device, seed, ...)
+
+    Returns:
+        dict with keys:
+            geometry (CycloneAxisymGeometry), rho (float), nu (float),
+            v_inlet (float), model (CycloneFieldPINN, eval mode),
+            scaler (FieldScaler), history (dict, see train_field_model),
+            grid (dict: r_m/z_m/v_r_ms/v_theta_ms/v_z_ms/pressure_pa lists)
+    """
+    geometry = geometry_from_dimensions_mm(
+        barrel_diameter_mm=barrel_diameter_mm,
+        barrel_height_mm=barrel_height_mm,
+        cone_height_mm=cone_height_mm,
+        exhaust_dia_mm=exhaust_dia_mm,
+        exhaust_length_mm=exhaust_length_mm,
+        bottom_outlet_mm=bottom_outlet_mm,
+    )
+
+    gas_onehot = torch.tensor([gas_type_to_onehot(gas_type)])
+    rho_t, nu_t = fluid_properties(
+        torch.tensor([operating_temp_c]),
+        torch.tensor([operating_press_kpa]),
+        gas_onehot,
+    )
+    rho, nu = rho_t.item(), nu_t.item()
+
+    v_inlet = inlet_velocity_ms(
+        torch.tensor([flow_rate_cfm]),
+        torch.tensor([inlet_height_mm * 1e-3]),
+        torch.tensor([inlet_width_mm * 1e-3]),
+    ).item()
+
+    model, scaler, history = train_field_model(
+        geometry, rho, nu, v_inlet,
+        epochs_adam=epochs_adam,
+        epochs_lbfgs=epochs_lbfgs,
+        on_progress=on_progress,
+        **train_kwargs,
+    )
+
+    grid = evaluate_grid(model, scaler, geometry)
+
+    return {
+        "geometry": geometry,
+        "rho": rho,
+        "nu": nu,
+        "v_inlet": v_inlet,
+        "model": model,
+        "scaler": scaler,
+        "history": history,
+        "grid": grid,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# CLI — offline testing/tuning without going through the HTTP service.
+# Calls the exact same run_field_prediction_job as app.py, so results seen
+# here match what /predict_field/start would produce for the same inputs.
+# ─────────────────────────────────────────────────────────────────────────
+
+def _build_arg_parser():
+    import argparse
+
+    p = argparse.ArgumentParser(
+        description=(
+            "Train and evaluate a CycloneFieldPINN for one geometry/"
+            "operating point, offline — no HTTP service required. Prints a "
+            "summary and optionally writes the full grid result to JSON."
+        ),
+    )
+    geo = p.add_argument_group("geometry (mm)")
+    geo.add_argument("--barrel-diameter-mm", type=float, required=True)
+    geo.add_argument("--barrel-height-mm", type=float, required=True)
+    geo.add_argument("--cone-height-mm", type=float, required=True)
+    geo.add_argument("--exhaust-dia-mm", type=float, required=True)
+    geo.add_argument("--exhaust-length-mm", type=float, required=True)
+    geo.add_argument("--bottom-outlet-mm", type=float, required=True)
+    geo.add_argument("--inlet-height-mm", type=float, required=True)
+    geo.add_argument("--inlet-width-mm", type=float, required=True)
+
+    proc = p.add_argument_group("process conditions")
+    proc.add_argument("--flow-rate-cfm", type=float, required=True)
+    proc.add_argument("--operating-temp-c", type=float, default=25.0)
+    proc.add_argument("--operating-press-kpa", type=float, default=101.325)
+    proc.add_argument("--gas-type", type=str, default="Air")
+
+    train = p.add_argument_group("training")
+    train.add_argument("--epochs-adam", type=int, default=3000)
+    train.add_argument("--epochs-lbfgs", type=int, default=300)
+    train.add_argument("--n-interior", type=int, default=2048)
+    train.add_argument("--hidden", type=int, default=64)
+    train.add_argument("--n-layers", type=int, default=6)
+    train.add_argument("--lr-adam-start", type=float, default=3e-3)
+    train.add_argument("--lr-adam-end", type=float, default=1e-4)
+    train.add_argument("--lr-lbfgs", type=float, default=0.5)
+    train.add_argument("--grad-clip-norm", type=float, default=1.0)
+    train.add_argument("--device", type=str, default="cpu")
+    train.add_argument("--seed", type=int, default=0)
+    train.add_argument("--progress-every", type=int, default=25)
+    train.add_argument("--quiet", action="store_true",
+                        help="suppress per-epoch progress printing")
+
+    out = p.add_argument_group("output")
+    out.add_argument("--output-json", type=str, default=None,
+                      help="if set, write the full grid result + history to this path")
+
+    return p
+
+
+def _cli_progress_printer(epoch: int, total: int, loss: float) -> None:
+    print(f"[{epoch:>5}/{total}] loss={loss:.6e}")
+
+
+def main(argv: Optional[list] = None) -> None:
+    args = _build_arg_parser().parse_args(argv)
+
+    on_progress = None if args.quiet else _cli_progress_printer
+
+    print(
+        f"Training field model: barrel_d={args.barrel_diameter_mm}mm, "
+        f"flow={args.flow_rate_cfm}CFM, gas={args.gas_type}, "
+        f"epochs=({args.epochs_adam} Adam + {args.epochs_lbfgs} L-BFGS)"
+    )
+
+    result = run_field_prediction_job(
+        barrel_diameter_mm=args.barrel_diameter_mm,
+        barrel_height_mm=args.barrel_height_mm,
+        cone_height_mm=args.cone_height_mm,
+        exhaust_dia_mm=args.exhaust_dia_mm,
+        exhaust_length_mm=args.exhaust_length_mm,
+        bottom_outlet_mm=args.bottom_outlet_mm,
+        inlet_height_mm=args.inlet_height_mm,
+        inlet_width_mm=args.inlet_width_mm,
+        flow_rate_cfm=args.flow_rate_cfm,
+        operating_temp_c=args.operating_temp_c,
+        operating_press_kpa=args.operating_press_kpa,
+        gas_type=args.gas_type,
+        epochs_adam=args.epochs_adam,
+        epochs_lbfgs=args.epochs_lbfgs,
+        n_interior=args.n_interior,
+        hidden=args.hidden,
+        n_layers=args.n_layers,
+        lr_adam_start=args.lr_adam_start,
+        lr_adam_end=args.lr_adam_end,
+        lr_lbfgs=args.lr_lbfgs,
+        grad_clip_norm=args.grad_clip_norm,
+        device=args.device,
+        seed=args.seed,
+        on_progress=on_progress,
+        progress_every=args.progress_every,
+    )
+
+    history = result["history"]
+    grid = result["grid"]
+    print("\n── Done ──────────────────────────────────────────────")
+    print(f"rho={result['rho']:.5f} kg/m3  nu={result['nu']:.3e} m2/s  "
+          f"v_inlet={result['v_inlet']:.4f} m/s")
+    print(f"final_loss={history['final_loss']:.6e}  "
+          f"wall_time_s={history['wall_time_s']:.1f}")
+    print(f"grid points evaluated: {len(grid['r_m'])}")
+
+    if args.output_json:
+        import json
+        payload = {
+            "rho_kgm3": result["rho"],
+            "nu_m2s": result["nu"],
+            "v_inlet_ms": result["v_inlet"],
+            "final_loss": history["final_loss"],
+            "wall_time_s": history["wall_time_s"],
+            "grid": grid,
+        }
+        with open(args.output_json, "w") as f:
+            json.dump(payload, f)
+        print(f"Wrote grid result to {args.output_json}")
+
+
+if __name__ == "__main__":
+    main()

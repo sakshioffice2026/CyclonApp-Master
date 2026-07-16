@@ -625,6 +625,76 @@ public class DesignController : Controller
         }
     }
 
+    // ── FIELD PREDICTION (physics-guided field solve, async job) ────────────
+    // JSON endpoints, not redirects: a field solve takes real minutes, so the
+    // client starts a job and polls status via AJAX rather than the
+    // request/redirect flow used by PredictWithModel above.
+
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> StartFieldPrediction(int id)
+    {
+        try
+        {
+            var revision = await _designRepository.GetRevisionWithDetailsAsync(id);
+            if (revision == null) return NotFound();
+
+            var output = string.IsNullOrEmpty(revision.EfficiencyJson)
+                ? null
+                : JsonSerializer.Deserialize<CyclonOutputDto>(revision.EfficiencyJson, _jsonOpts);
+            var dims = output?.Dimensions;
+            if (dims == null)
+            {
+                return BadRequest(new { error = "Run the standard calculation for this revision first — no geometry available yet." });
+            }
+
+            var jobId = await _predictionRepository.StartFieldPredictionAsync(revision, dims);
+
+            _logger.LogInformation("Field prediction job {JobId} started for Revision {RevId}.", jobId, id);
+
+            return Ok(new { jobId, status = "running" });
+        }
+        catch (FieldPredictionCapacityExceededException ex)
+        {
+            return StatusCode(StatusCodes.Status429TooManyRequests, new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _uow.exceptionHandlerRepository.SaveException(
+                "DesignController",
+                "StartFieldPrediction",
+                ex.ToString());
+
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                new { error = "The field prediction service is unavailable. Please try again shortly." });
+        }
+    }
+
+    [HttpGet]
+    public async Task<IActionResult> FieldPredictionStatus(string jobId)
+    {
+        try
+        {
+            var status = await _predictionRepository.GetFieldPredictionStatusAsync(jobId);
+            if (status == null)
+            {
+                return NotFound(new { error = "Job not found — it may have expired. Start a new field prediction." });
+            }
+
+            return Ok(status);
+        }
+        catch (Exception ex)
+        {
+            _uow.exceptionHandlerRepository.SaveException(
+                "DesignController",
+                "FieldPredictionStatus",
+                ex.ToString());
+
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                new { error = "The field prediction service is unavailable. Please try again shortly." });
+        }
+    }
+
     private DesignResultsViewModel BuildResultsVm(DesignRevision revision)
     {
         var output = string.IsNullOrEmpty(revision.EfficiencyJson)
