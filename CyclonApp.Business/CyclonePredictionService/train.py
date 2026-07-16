@@ -1,4 +1,4 @@
-"""
+python -c "import torch; print(torch.__version__)""""
 train.py
 ────────
 Loss = w_reg  * ||correction||^2                 (defer to physics absent evidence)

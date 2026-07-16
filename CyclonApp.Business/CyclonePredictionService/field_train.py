@@ -93,6 +93,89 @@ BC_LOSS_WEIGHT = 10.0
 
 OnProgressFn = Callable[[int, int, float], None]
 
+# ─────────────────────────────────────────────────────────────────────────
+# RESIDUAL NON-DIMENSIONALIZATION (root-cause fix for loss reaching
+# 1e18-1e23 at realistic inlet velocities — confirmed empirically, not
+# theoretical: a freshly-initialized network at v_inlet=78.66 m/s produces
+# eps ~ 3.6e6 and k ~ 4.2e3 purely from FieldScaler's own K/E scales, so
+# the eps-equation's destruction term (C2_EPS * eps^2 / k) evaluates to
+# ~6e9 BEFORE any training happens — squared into the loss, that alone is
+# ~3.6e19, matching exactly the magnitude seen stuck in real training runs.
+#
+# FieldScaler already non-dimensionalizes the network's INPUTS (r, z by L)
+# and OUTPUTS (v by U, p by P, k by K, eps by E) — see field_model.py. That
+# was necessary but not sufficient: the PDE/turbulence residuals computed
+# FROM those outputs are still raw, dimensional physical quantities, and
+# their natural scale is extremely sensitive to velocity because the
+# dissipation-rate scale E = U^3/L grows with velocity CUBED. A cyclone
+# design with a high inlet velocity (confirmed: doubling v_inlet from
+# ~78 m/s to ~157 m/s took the loss from ~1e19 to ~1e23) will blow up the
+# loss by construction, regardless of how well the network is training,
+# unless the residuals themselves are non-dimensionalized the same way
+# the outputs already are. This is standard PINN practice (see e.g. Raissi
+# et al. 2019 discussions of residual scaling; also standard CFD practice
+# of solving in non-dimensional form) — it was simply missing here because
+# turbulence was added incrementally on top of an already-working laminar
+# residual that didn't have this sensitivity (laminar residuals scale with
+# U^2/L at worst, not U^3/L).
+#
+# Each residual is divided by its own characteristic physical scale before
+# squaring, so all loss terms are O(1) in magnitude regardless of the
+# absolute velocity/geometry scale of a given design:
+#   continuity        : units of 1/s              -> scale U/L
+#   r/theta/z momentum : units of m/s^2            -> scale U^2/L
+#   k_equation         : units of m^2/s^3 (= E)    -> scale E
+#   eps_equation       : units of m^2/s^4 (= E*U/L)-> scale E*U/L
+# ─────────────────────────────────────────────────────────────────────────
+
+def _pde_residual_scales(scaler: FieldScaler) -> dict[str, float]:
+    U, L, E = scaler.U, scaler.L, scaler.E
+    return {
+        "continuity": U / L,
+        "r_momentum": U ** 2 / L,
+        "theta_momentum": U ** 2 / L,
+        "z_momentum": U ** 2 / L,
+        "k_equation": E,
+        "eps_equation": E * U / L,
+    }
+
+
+# BC residuals are direct value/gradient differences (not PDE operators),
+# so their natural magnitude is already tied to the quantity being
+# compared (e.g. "inlet_eps" = predicted_eps - eps_inlet, which for a high-
+# velocity design can itself be ~1e4-1e5 before squaring) rather than
+# velocity-cubed PDE terms — but they are just as un-scaled as the PDE
+# residuals were, so the same non-dimensionalization is applied for
+# consistency and to keep BC_LOSS_WEIGHT meaningful across designs of very
+# different scale. Value terms scale by the quantity's own characteristic
+# scale; gradient terms (name ends in _dr/_dz) scale by (quantity scale)/L.
+_BC_VELOCITY_KEYS = {
+    "wall_vr", "wall_vtheta", "wall_vz",
+    "axis_vr", "axis_vtheta", "axis_dvz_dr",
+    "inlet_vr", "inlet_vtheta", "inlet_vz",
+    "outlet_dvr_dz", "outlet_dvtheta_dz", "outlet_dvz_dz",
+}
+_BC_K_KEYS = {"wall_k", "axis_dk_dr", "inlet_k", "outlet_dk_dz"}
+_BC_EPS_KEYS = {"wall_eps", "axis_deps_dr", "inlet_eps", "outlet_deps_dz"}
+_BC_PRESSURE_KEYS = {"outlet_p"}
+
+
+def _bc_residual_scale(key: str, scaler: FieldScaler) -> float:
+    is_gradient = key.endswith("_dr") or key.endswith("_dz")
+    if key in _BC_EPS_KEYS:
+        return (scaler.E / scaler.L) if is_gradient else scaler.E
+    if key in _BC_K_KEYS:
+        return (scaler.K / scaler.L) if is_gradient else scaler.K
+    if key in _BC_PRESSURE_KEYS:
+        return scaler.P
+    if key in _BC_VELOCITY_KEYS:
+        return (scaler.U / scaler.L) if is_gradient else scaler.U
+    # Should never happen given the fixed set of keys assemble_bc_losses
+    # returns — fail loudly rather than silently skip scaling a term.
+    raise KeyError(f"Unrecognized BC residual key '{key}' — add it to one "
+                    f"of the _BC_*_KEYS sets in field_train.py so it gets "
+                    f"properly non-dimensionalized.")
+
 # rans_field_residuals divides by r and r^2 (with only a 1e-9 numerical
 # floor) in the r- and theta-momentum residuals. geometry.sample_interior
 # draws r uniformly across the full [0, wall_r] range, so with realistic
@@ -144,33 +227,47 @@ def _sample_interior_away_from_axis(
 
 
 def _pde_and_turb_loss(model_fn, geometry: CycloneAxisymGeometry, rho: torch.Tensor,
-                        nu: torch.Tensor, n_interior: int, device: str) -> torch.Tensor:
+                        nu: torch.Tensor, scaler: FieldScaler, n_interior: int,
+                        device: str) -> torch.Tensor:
     r, z = _sample_interior_away_from_axis(geometry, n_interior, device)
     res = rans_field_residuals(model_fn, r, z, rho, nu)
+    scales = _pde_residual_scales(scaler)
     pde = (
-        (res["continuity"] ** 2).mean()
-        + (res["r_momentum"] ** 2).mean()
-        + (res["theta_momentum"] ** 2).mean()
-        + (res["z_momentum"] ** 2).mean()
-    )
+        (res["continuity"] / scales["continuity"]) ** 2
+    ).mean() + (
+        (res["r_momentum"] / scales["r_momentum"]) ** 2
+    ).mean() + (
+        (res["theta_momentum"] / scales["theta_momentum"]) ** 2
+    ).mean() + (
+        (res["z_momentum"] / scales["z_momentum"]) ** 2
+    ).mean()
     turb = (
-        (res["k_equation"] ** 2).mean()
-        + (res["eps_equation"] ** 2).mean()
-    )
+        (res["k_equation"] / scales["k_equation"]) ** 2
+    ).mean() + (
+        (res["eps_equation"] / scales["eps_equation"]) ** 2
+    ).mean()
     return PDE_LOSS_WEIGHT * pde + TURB_LOSS_WEIGHT * turb
 
 
 def _bc_loss(model_fn, geometry: CycloneAxisymGeometry, v_inlet: torch.Tensor,
-             k_inlet: torch.Tensor, eps_inlet: torch.Tensor, device: str) -> torch.Tensor:
+             k_inlet: torch.Tensor, eps_inlet: torch.Tensor, scaler: FieldScaler,
+             device: str) -> torch.Tensor:
     bc_losses = assemble_bc_losses(model_fn, geometry, v_inlet, k_inlet, eps_inlet, device=device)
-    return sum(bc_losses.values())
+    # bc_losses values are ALREADY mean-squared (see assemble_bc_losses),
+    # so we divide by scale**2 here, not scale, to non-dimensionalize them
+    # the same way the PDE/turbulence residuals above are.
+    total = 0.0
+    for key, mean_sq_residual in bc_losses.items():
+        scale = _bc_residual_scale(key, scaler)
+        total = total + mean_sq_residual / (scale ** 2)
+    return total
 
 
 def _total_loss(model, scaler, geometry, rho, nu, v_inlet, k_inlet, eps_inlet,
                  n_interior: int, device: str) -> torch.Tensor:
     model_fn = model.as_model_fn(scaler)
-    pde_turb = _pde_and_turb_loss(model_fn, geometry, rho, nu, n_interior, device)
-    bc = _bc_loss(model_fn, geometry, v_inlet, k_inlet, eps_inlet, device)
+    pde_turb = _pde_and_turb_loss(model_fn, geometry, rho, nu, scaler, n_interior, device)
+    bc = _bc_loss(model_fn, geometry, v_inlet, k_inlet, eps_inlet, scaler, device)
     return pde_turb + BC_LOSS_WEIGHT * bc
 
 
@@ -289,19 +386,20 @@ def train_field_model(
         optimizer_lbfgs.zero_grad(set_to_none=True)
         model_fn = model.as_model_fn(scaler)
         res = rans_field_residuals(model_fn, r_fixed, z_fixed, rho_t, nu_t)
+        scales = _pde_residual_scales(scaler)
         pde_turb_loss = (
             PDE_LOSS_WEIGHT * (
-                (res["continuity"] ** 2).mean()
-                + (res["r_momentum"] ** 2).mean()
-                + (res["theta_momentum"] ** 2).mean()
-                + (res["z_momentum"] ** 2).mean()
+                ((res["continuity"] / scales["continuity"]) ** 2).mean()
+                + ((res["r_momentum"] / scales["r_momentum"]) ** 2).mean()
+                + ((res["theta_momentum"] / scales["theta_momentum"]) ** 2).mean()
+                + ((res["z_momentum"] / scales["z_momentum"]) ** 2).mean()
             )
             + TURB_LOSS_WEIGHT * (
-                (res["k_equation"] ** 2).mean()
-                + (res["eps_equation"] ** 2).mean()
+                ((res["k_equation"] / scales["k_equation"]) ** 2).mean()
+                + ((res["eps_equation"] / scales["eps_equation"]) ** 2).mean()
             )
         )
-        bc = _bc_loss(model_fn, geometry, v_inlet_t, k_inlet_t, eps_inlet_t, device)
+        bc = _bc_loss(model_fn, geometry, v_inlet_t, k_inlet_t, eps_inlet_t, scaler, device)
         loss = pde_turb_loss + BC_LOSS_WEIGHT * bc
         loss.backward()
         closure_history["losses"].append(float(loss.item()))
