@@ -14,17 +14,26 @@ spatial field, not a small bounded scalar nudge.
 from __future__ import annotations
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class FieldScaler:
     """Non-dimensionalizes (r, z) by a characteristic length and outputs by
-    a characteristic velocity/pressure — keeps network inputs/outputs in a
-    well-conditioned range regardless of the cyclone's absolute size."""
+    a characteristic velocity/pressure/turbulence scale — keeps network
+    inputs/outputs in a well-conditioned range regardless of the cyclone's
+    absolute size.
+
+    Turbulence scales (K, E) are the standard dimensional estimates for
+    turbulence kinetic energy (~ velocity^2) and dissipation rate
+    (~ velocity^3 / length) — see e.g. Pope, "Turbulent Flows", Ch. 5.
+    """
 
     def __init__(self, length_scale_m: float, velocity_scale_ms: float, rho: float):
         self.L = length_scale_m
         self.U = velocity_scale_ms
         self.P = rho * velocity_scale_ms ** 2  # dynamic-pressure scale
+        self.K = velocity_scale_ms ** 2  # turbulence kinetic energy scale
+        self.E = (velocity_scale_ms ** 3) / length_scale_m  # dissipation-rate scale
 
     def scale_inputs(self, r: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         return torch.stack([r / self.L, z / self.L], dim=1)
@@ -35,15 +44,22 @@ class FieldScaler:
             "v_theta": raw[:, 1] * self.U,
             "v_z": raw[:, 2] * self.U,
             "p": raw[:, 3] * self.P,
+            # softplus guarantees k, eps > 0 everywhere (structurally, not
+            # via a clamp) — required since both are physically
+            # non-negative quantities and appear as denominators in the
+            # eddy-viscosity closure (field_turbulence.eddy_viscosity).
+            "k": F.softplus(raw[:, 4]) * self.K,
+            "eps": F.softplus(raw[:, 5]) * self.E,
         }
 
     def state_dict(self):
-        return {"L": self.L, "U": self.U, "P": self.P}
+        return {"L": self.L, "U": self.U, "P": self.P, "K": self.K, "E": self.E}
 
     @classmethod
     def from_state_dict(cls, sd):
         obj = cls.__new__(cls)
         obj.L, obj.U, obj.P = sd["L"], sd["U"], sd["P"]
+        obj.K, obj.E = sd["K"], sd["E"]
         return obj
 
 
@@ -53,7 +69,9 @@ class CycloneFieldPINN(nn.Module):
         layers: list[nn.Module] = [nn.Linear(2, hidden), nn.Tanh()]
         for _ in range(n_layers - 1):
             layers += [nn.Linear(hidden, hidden), nn.Tanh()]
-        layers += [nn.Linear(hidden, 4)]  # v_r, v_theta, v_z, p (scaled)
+        # v_r, v_theta, v_z, p, k_raw, eps_raw (last two softplus-mapped
+        # to positive k, eps by FieldScaler.unscale_outputs)
+        layers += [nn.Linear(hidden, 6)]
         self.net = nn.Sequential(*layers)
 
     def forward(self, r: torch.Tensor, z: torch.Tensor, scaler: FieldScaler) -> dict[str, torch.Tensor]:

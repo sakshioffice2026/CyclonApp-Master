@@ -20,6 +20,19 @@ where each surface is sampled):
   Bottom outlet (dust exit)  : pressure reference,  -> p = 0 (gauge),
     Top exhaust outlet          zero-gradient outflow  d(v_r)/dz = d(v_theta)/dz
                                                         = d(v_z)/dz = 0
+
+RANS turbulence quantities (k, epsilon) add their own boundary conditions,
+consistent with the Launder-Sharma low-Re closure in field_turbulence.py:
+
+  Outer wall                 : k = 0, epsilon = 0 exactly (the defining
+                                property of a low-Re model that integrates
+                                to the wall without wall functions).
+  Axis (r = 0)                : symmetry -> d(k)/dr = 0, d(epsilon)/dr = 0.
+  Inlet ring                  : prescribed via the turbulence-intensity
+                                method (field_turbulence.
+                                inlet_turbulence_quantities).
+  Bottom/top outlets           : zero-gradient outflow, same convention as
+                                the velocity/pressure outlet BCs above.
 """
 from __future__ import annotations
 import torch
@@ -33,31 +46,41 @@ def wall_noslip_residual(model_fn, r: torch.Tensor, z: torch.Tensor) -> dict[str
         "wall_vr": out["v_r"],
         "wall_vtheta": out["v_theta"],
         "wall_vz": out["v_z"],
+        "wall_k": out["k"],
+        "wall_eps": out["eps"],
     }
 
 
 def axis_symmetry_residual(model_fn, r: torch.Tensor, z: torch.Tensor) -> dict[str, torch.Tensor]:
     out = model_fn(r, z)
     dvz_dr = _grad(out["v_z"], r)
+    dk_dr = _grad(out["k"], r)
+    deps_dr = _grad(out["eps"], r)
     return {
         "axis_vr": out["v_r"],
         "axis_vtheta": out["v_theta"],
         "axis_dvz_dr": dvz_dr,
+        "axis_dk_dr": dk_dr,
+        "axis_deps_dr": deps_dr,
     }
 
 
 def inlet_ring_residual(model_fn, r: torch.Tensor, z: torch.Tensor,
-                         v_inlet: torch.Tensor) -> dict[str, torch.Tensor]:
+                         v_inlet: torch.Tensor,
+                         k_inlet: torch.Tensor,
+                         eps_inlet: torch.Tensor) -> dict[str, torch.Tensor]:
     """
-    v_inlet: tangential inlet speed (m/s), one value per point (broadcast a
-    scalar if all inlet points share the same operating condition, or vary
-    per-point if training across multiple design cases simultaneously).
+    v_inlet: tangential inlet speed (m/s). k_inlet, eps_inlet: turbulence
+    quantities from field_turbulence.inlet_turbulence_quantities. Each may
+    be a scalar (broadcast) or one value per point.
     """
     out = model_fn(r, z)
     return {
         "inlet_vtheta": out["v_theta"] - v_inlet,
         "inlet_vr": out["v_r"],
         "inlet_vz": out["v_z"],
+        "inlet_k": out["k"] - k_inlet,
+        "inlet_eps": out["eps"] - eps_inlet,
     }
 
 
@@ -66,11 +89,15 @@ def outlet_residual(model_fn, r: torch.Tensor, z: torch.Tensor) -> dict[str, tor
     dvr_dz = _grad(out["v_r"], z)
     dvt_dz = _grad(out["v_theta"], z)
     dvz_dz = _grad(out["v_z"], z)
+    dk_dz = _grad(out["k"], z)
+    deps_dz = _grad(out["eps"], z)
     return {
         "outlet_p": out["p"],          # gauge pressure reference = 0
         "outlet_dvr_dz": dvr_dz,
         "outlet_dvtheta_dz": dvt_dz,
         "outlet_dvz_dz": dvz_dz,
+        "outlet_dk_dz": dk_dz,
+        "outlet_deps_dz": deps_dz,
     }
 
 
@@ -78,6 +105,8 @@ def assemble_bc_losses(
     model_fn,
     geometry,
     v_inlet: torch.Tensor,
+    k_inlet: torch.Tensor,
+    eps_inlet: torch.Tensor,
     n_wall: int = 256,
     n_axis: int = 128,
     n_inlet: int = 128,
@@ -103,7 +132,13 @@ def assemble_bc_losses(
     v_inlet_pt = v_inlet if torch.is_tensor(v_inlet) else torch.full((n_inlet,), float(v_inlet), device=device)
     if v_inlet_pt.numel() == 1:
         v_inlet_pt = v_inlet_pt.expand(n_inlet)
-    for k, v in inlet_ring_residual(model_fn, r_i, z_i, v_inlet_pt).items():
+    k_inlet_pt = k_inlet if torch.is_tensor(k_inlet) else torch.full((n_inlet,), float(k_inlet), device=device)
+    if k_inlet_pt.numel() == 1:
+        k_inlet_pt = k_inlet_pt.expand(n_inlet)
+    eps_inlet_pt = eps_inlet if torch.is_tensor(eps_inlet) else torch.full((n_inlet,), float(eps_inlet), device=device)
+    if eps_inlet_pt.numel() == 1:
+        eps_inlet_pt = eps_inlet_pt.expand(n_inlet)
+    for k, v in inlet_ring_residual(model_fn, r_i, z_i, v_inlet_pt, k_inlet_pt, eps_inlet_pt).items():
         losses[k] = (v ** 2).mean()
 
     r_bo, z_bo = geometry.sample_bottom_outlet(n_outlet, device=device)
