@@ -231,7 +231,15 @@ def _pde_and_turb_loss(model_fn, geometry: CycloneAxisymGeometry, rho: torch.Ten
                         nu: torch.Tensor, scaler: FieldScaler, n_interior: int,
                         device: str) -> torch.Tensor:
     r, z = _sample_interior_away_from_axis(geometry, n_interior, device)
-    res = rans_field_residuals(model_fn, r, z, rho, nu)
+    # k_floor (root-cause fix, see field_turbulence.rans_field_residuals
+    # docstring): guards the eps-equation's k denominator from blowing up
+    # when an early/adversarial collocation point has softplus(k) underflow
+    # near 0 while eps is still O(its own scale) -- confirmed by hand
+    # calculation to produce single-point residuals of ~1e24-1e27, matching
+    # real observed loss blowups (~1e22) in training runs that never
+    # converged. Scaled to this design's own K (=U^2), not an absolute
+    # constant, so it adapts to any cyclone size/velocity.
+    res = rans_field_residuals(model_fn, r, z, rho, nu, k_floor=1e-6 * scaler.K)
     scales = _pde_residual_scales(scaler)
     pde = (
         (res["continuity"] / scales["continuity"]) ** 2
@@ -392,7 +400,11 @@ def train_field_model(
     def closure():
         optimizer_lbfgs.zero_grad(set_to_none=True)
         model_fn = model.as_model_fn(scaler)
-        res = rans_field_residuals(model_fn, r_fixed, z_fixed, rho_t, nu_t)
+        # Same k_floor protection as the Adam phase (see
+        # field_turbulence.rans_field_residuals docstring) -- this call
+        # site was missing it, leaving the L-BFGS phase equally exposed to
+        # the eps-equation k-underflow blowup.
+        res = rans_field_residuals(model_fn, r_fixed, z_fixed, rho_t, nu_t, k_floor=1e-6 * scaler.K)
         scales = _pde_residual_scales(scaler)
         pde_turb_loss = (
             PDE_LOSS_WEIGHT * (

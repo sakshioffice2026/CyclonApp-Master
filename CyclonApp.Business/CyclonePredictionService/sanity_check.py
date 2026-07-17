@@ -206,86 +206,256 @@ def check_wall_and_axis(grid: dict, v_inlet: float) -> bool:
 
 	return ok
 
+	def check_mass_conservation(grid: dict) -> bool:
+    """Check volumetric flow consistency across the cylindrical barrel."""
+    import math
 
-def check_mass_conservation(grid: dict) -> bool:
-	"""Computes Q(z) = integral of v_z * 2*pi*r dr at each z cross-section
-	(trapezoidal rule over the sorted r values present at that z) and
-	checks Q(z) stays reasonably consistent across sections. This is
-	stronger evidence of a physically valid solution than the training
-	loss alone — it checks continuity is satisfied in aggregate, not just
-	that the pointwise PDE residual was small at the collocation points
-	used during training."""
-	import math
-	groups = _group_by_z(grid)
-	z_values = sorted(groups.keys())
-	if len(z_values) < 3:
-		report("Mass conservation", "WARN", "too few z-levels to check")
-		return True
+    groups = _group_by_z(grid)
+    z_values = sorted(groups.keys())
 
-	flows = []
-	for z in z_values:
-		pts_sorted = sorted(groups[z], key=lambda p: p[0])
-		rs = [p[0] for p in pts_sorted]
-		vzs = [p[3] for p in pts_sorted]
-		if len(rs) < 2:
-			continue
-		q = 0.0
-		for i in range(1, len(rs)):
-			r0, r1 = rs[i - 1], rs[i]
-			integrand0 = vzs[i - 1] * 2 * math.pi * r0
-			integrand1 = vzs[i] * 2 * math.pi * r1
-			q += 0.5 * (integrand0 + integrand1) * (r1 - r0)
-		flows.append((z, q))
+    if len(z_values) < 3:
+        report("Mass conservation", "WARN", "too few z-levels to check")
+        return True
 
-	if len(flows) < 3:
-		report("Mass conservation", "WARN", "too few valid cross-sections to check")
-		return True
-	# Skip the first/last few z-levels — inlet/outlet regions have real
-	# inflow/outflow so Q(z) is EXPECTED to change there; the barrel's
-	# mid-section (away from inlet and outlets) is where Q(z) should be
-	# closest to constant if continuity is well satisfied.
-	mid = flows[len(flows) // 4 : 3 * len(flows) // 4]
-	if len(mid) < 2:
-		mid = flows
+    flows = []
+    max_r_by_z = {}
 
-	print("\nQ(z):")
-	for z, q in flows:
-		print(f"{z:.4f}  {q:.6f}")
+    for z in z_values:
+        pts = sorted(groups[z], key=lambda p: p[0])
 
-	q_values = [q for _, q in mid]
-	q_mean = sum(q_values) / len(q_values)
-	q_spread = max(q_values) - min(q_values)
-	rel_spread = q_spread / abs(q_mean) if q_mean else float("inf")
+        if len(pts) < 2:
+            continue
 
-	if rel_spread > 0.5:
-		report(
-			"Mass conservation",
-			"FAIL",
-			f"volumetric flow Q(z) varies by {rel_spread:.1%} across the "
-			f"barrel mid-section (mean {q_mean:.4f} m^3/s) — continuity "
-			f"not well satisfied in aggregate",
-		)
-		return False
+        rs = [p[0] for p in pts]
+        vzs = [p[3] for p in pts]
 
-	elif rel_spread > 0.2:
-		report(
-			"Mass conservation",
-			"WARN",
-			f"Q(z) varies by {rel_spread:.1%} across the barrel "
-			f"mid-section (mean {q_mean:.4f} m^3/s) — some inconsistency, "
-			f"may improve with more training",
-		)
-		return True
+        max_r_by_z[z] = rs[-1]
 
-	else:
-		report(
-			"Mass conservation",
-			"PASS",
-			f"Q(z) varies by only {rel_spread:.1%} across the barrel "
-			f"mid-section (mean {q_mean:.4f} m^3/s) — continuity well "
-			f"satisfied in aggregate",
-		)
-		return True
+        q = 0.0
+        for i in range(1, len(rs)):
+            r0 = rs[i - 1]
+            r1 = rs[i]
+
+            vz0 = vzs[i - 1]
+            vz1 = vzs[i]
+
+            q += (
+                0.5
+                * (
+                    vz0 * 2.0 * math.pi * r0
+                    + vz1 * 2.0 * math.pi * r1
+                )
+                * (r1 - r0)
+            )
+
+        flows.append((z, q))
+
+    if len(flows) < 3:
+        report(
+            "Mass conservation",
+            "WARN",
+            "too few valid cross-sections to check",
+        )
+        return True
+
+    # Detect barrel by constant outer radius.
+    r_barrel = max(max_r_by_z.values())
+
+    tol = max(1e-6, r_barrel * 0.005)
+
+    barrel_zs = [
+        z
+        for z in z_values
+        if abs(max_r_by_z[z] - r_barrel) <= tol
+    ]
+
+    if len(barrel_zs) < 3:
+        report(
+            "Mass conservation",
+            "WARN",
+            "unable to identify barrel region",
+        )
+        return True
+
+    start = len(barrel_zs) // 4
+    end = 3 * len(barrel_zs) // 4
+
+    mid_zs = set(barrel_zs[start:end] or barrel_zs)
+
+    mid = [(z, q) for z, q in flows if z in mid_zs]
+
+    if len(mid) < 2:
+        mid = [(z, q) for z, q in flows if z in barrel_zs]
+
+    print("\nQ(z):")
+    for z, q in mid:
+        print(f"{z:.4f}  {q:.6f}")
+
+    q_values = [q for _, q in mid]
+
+    q_mean = sum(q_values) / len(q_values)
+
+    rel_spread = (
+        (max(q_values) - min(q_values))
+        / abs(q_mean)
+        if abs(q_mean) > 1e-12
+        else float("inf")
+    )
+
+    if rel_spread > 0.5:
+        report(
+            "Mass conservation",
+            "FAIL",
+            f"volumetric flow Q(z) varies by {rel_spread:.1%} "
+            f"across barrel mid-section "
+            f"(mean {q_mean:.4f} m^3/s)",
+        )
+        return False
+
+    if rel_spread > 0.2:
+        report(
+            "Mass conservation",
+            "WARN",
+            f"Q(z) varies by {rel_spread:.1%} "
+            f"across barrel mid-section "
+            f"(mean {q_mean:.4f} m^3/s)",
+        )
+        return True
+
+    report(
+        "Mass conservation",
+        "PASS",
+        f"Q(z) varies by only {rel_spread:.1%} "
+        f"across barrel mid-section "
+        f"(mean {q_mean:.4f} m^3/s)",
+    )
+
+    return Truedef check_mass_conservation(grid: dict) -> bool:
+    """Check volumetric flow consistency across the cylindrical barrel."""
+    import math
+
+    groups = _group_by_z(grid)
+    z_values = sorted(groups.keys())
+
+    if len(z_values) < 3:
+        report("Mass conservation", "WARN", "too few z-levels to check")
+        return True
+
+    flows = []
+    max_r_by_z = {}
+
+    for z in z_values:
+        pts = sorted(groups[z], key=lambda p: p[0])
+
+        if len(pts) < 2:
+            continue
+
+        rs = [p[0] for p in pts]
+        vzs = [p[3] for p in pts]
+
+        max_r_by_z[z] = rs[-1]
+
+        q = 0.0
+        for i in range(1, len(rs)):
+            r0 = rs[i - 1]
+            r1 = rs[i]
+
+            vz0 = vzs[i - 1]
+            vz1 = vzs[i]
+
+            q += (
+                0.5
+                * (
+                    vz0 * 2.0 * math.pi * r0
+                    + vz1 * 2.0 * math.pi * r1
+                )
+                * (r1 - r0)
+            )
+
+        flows.append((z, q))
+
+    if len(flows) < 3:
+        report(
+            "Mass conservation",
+            "WARN",
+            "too few valid cross-sections to check",
+        )
+        return True
+
+    # Detect barrel by constant outer radius.
+    r_barrel = max(max_r_by_z.values())
+
+    tol = max(1e-6, r_barrel * 0.005)
+
+    barrel_zs = [
+        z
+        for z in z_values
+        if abs(max_r_by_z[z] - r_barrel) <= tol
+    ]
+
+    if len(barrel_zs) < 3:
+        report(
+            "Mass conservation",
+            "WARN",
+            "unable to identify barrel region",
+        )
+        return True
+
+    start = len(barrel_zs) // 4
+    end = 3 * len(barrel_zs) // 4
+
+    mid_zs = set(barrel_zs[start:end] or barrel_zs)
+
+    mid = [(z, q) for z, q in flows if z in mid_zs]
+
+    if len(mid) < 2:
+        mid = [(z, q) for z, q in flows if z in barrel_zs]
+
+    print("\nQ(z):")
+    for z, q in mid:
+        print(f"{z:.4f}  {q:.6f}")
+
+    q_values = [q for _, q in mid]
+
+    q_mean = sum(q_values) / len(q_values)
+
+    rel_spread = (
+        (max(q_values) - min(q_values))
+        / abs(q_mean)
+        if abs(q_mean) > 1e-12
+        else float("inf")
+    )
+
+    if rel_spread > 0.5:
+        report(
+            "Mass conservation",
+            "FAIL",
+            f"volumetric flow Q(z) varies by {rel_spread:.1%} "
+            f"across barrel mid-section "
+            f"(mean {q_mean:.4f} m^3/s)",
+        )
+        return False
+
+    if rel_spread > 0.2:
+        report(
+            "Mass conservation",
+            "WARN",
+            f"Q(z) varies by {rel_spread:.1%} "
+            f"across barrel mid-section "
+            f"(mean {q_mean:.4f} m^3/s)",
+        )
+        return True
+
+    report(
+        "Mass conservation",
+        "PASS",
+        f"Q(z) varies by only {rel_spread:.1%} "
+        f"across barrel mid-section "
+        f"(mean {q_mean:.4f} m^3/s)",
+    )
+
+    return True
+
 def main():
 	p = argparse.ArgumentParser(description=__doc__)
 	p.add_argument("json_path", help="Path to the field_train.py --output-json result")

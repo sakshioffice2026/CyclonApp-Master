@@ -141,6 +141,7 @@ def _strain_rate_components(
 
 def rans_field_residuals(
     model_fn, r: torch.Tensor, z: torch.Tensor, rho: torch.Tensor, nu: torch.Tensor,
+    k_floor: float = 0.0,
 ) -> dict[str, torch.Tensor]:
     """
     Full RANS residual set: continuity, r/theta/z-momentum (Boussinesq,
@@ -149,6 +150,24 @@ def rans_field_residuals(
     v_z, p, k, eps (see field_model.CycloneFieldPINN). r, z must
     require_grad. Every residual should be ~0 for a physically valid,
     converged solution.
+
+    k_floor: minimum value substituted for k when computing the
+        eps-equation's production_eps/destruction_eps terms (both divide
+        by k). ROOT-CAUSE FIX: k_safe previously used only `k + EPS` with
+        EPS=1e-9 -- an absolute constant with no relation to this design's
+        actual turbulence-KE scale (K = U^2, e.g. ~2.5e4 for a 157 m/s
+        inlet), so it's ~1e-14 of K and gives essentially no protection.
+        Early/adversarial collocation points can have softplus(raw_k)
+        underflow toward ~0 while eps is still O(its own scale) -- confirmed
+        by hand-calculation to produce single-point eps-equation residuals
+        of ~1e24-1e27 even after the module's own non-dimensionalization,
+        which is the right order of magnitude to explain real observed
+        blowups (final_loss ~8e22 in one training run). nu_t already has
+        an analogous safeguard (MAX_VISCOSITY_RATIO clamp above); k_safe
+        in the eps-equation had none. Callers should pass
+        k_floor=1e-6 * scaler.K (a small fraction of the problem's own K
+        scale, so it adapts to any design size/velocity) -- default 0.0
+        preserves old (EPS-only) behavior for any other caller.
     """
     out = model_fn(r, z)
     v_r, v_theta, v_z, p = out["v_r"], out["v_theta"], out["v_z"], out["p"]
@@ -224,7 +243,15 @@ def rans_field_residuals(
     k_equation = (v_r * dk_dr + v_z * dk_dz) - diff_k - production + eps + wall_damping_D
 
     # ── epsilon-equation (Launder-Sharma) ────────────────────────────────
+    # k_floor only guards THIS denominator (production_eps/destruction_eps).
+    # It must not replace k anywhere else (dk_dr above, eddy_viscosity,
+    # etc.) -- k legitimately -> 0 at the wall under this low-Re closure,
+    # and torch.clamp has zero gradient in the clamped region, so clamping
+    # k itself would silently kill the k-equation's diffusion/wall-damping
+    # derivatives exactly where they matter most.
     k_safe = k + EPS
+    if k_floor > 0.0:
+        k_safe = torch.clamp(k_safe, min=k_floor)
     gamma_eps = nu + nu_t / SIGMA_EPS
     deps_dr = _grad(eps, r)
     deps_dz = _grad(eps, z)
