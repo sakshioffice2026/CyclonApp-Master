@@ -108,7 +108,12 @@ namespace CyclonApp.Repositories.Repositories
                 FlowRateCFM = (double)input.FlowRateCFM,
                 OperatingTempC = (double)input.OperatingTempC,
                 OperatingPressKPa = (double)input.OperatingPressKPa,
-                GasType = input.GasType
+                // The Python model requires a non-null string. The C# property
+                // defaults to "Air" for objects created in code, but that
+                // default never applies to a row already sitting in the DB
+                // with GasType = NULL — sending that through as JSON null was
+                // failing Pydantic validation (422) before this guard.
+                GasType = string.IsNullOrWhiteSpace(input.GasType) ? "Air" : input.GasType
             };
 
             var response = await client.PostAsJsonAsync("/predict_field/start", request);
@@ -120,7 +125,18 @@ namespace CyclonApp.Repositories.Repositories
                     detail ?? "Too many field-prediction jobs running. Try again shortly.");
             }
 
-            response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode)
+            {
+                // Previously this went straight to EnsureSuccessStatusCode(),
+                // which throws before the response body (FastAPI's {"detail": ...})
+                // is ever read — every non-429 failure showed up in logs as a
+                // bare "422 Unprocessable Content" with no indication of which
+                // field was invalid. Surface it.
+                var detail = await TryReadErrorDetailAsync(response);
+                throw new Exception(
+                    $"Field prediction service returned {(int)response.StatusCode} " +
+                    $"{response.StatusCode}: {detail ?? "(no error detail in response body)"}");
+            }
 
             var result = await response.Content.ReadFromJsonAsync<PredictFieldStartResponse>()
                          ?? throw new Exception("Field prediction service returned an empty start response.");

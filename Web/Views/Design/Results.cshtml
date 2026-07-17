@@ -33,10 +33,10 @@
            class="btn btn-primary btn-sm">
             <i class="bi bi-arrow-repeat me-1"></i>New Revision
         </a>
-        <a href="/Export/Pdf/@Model.RevisionId" class="btn btn-outline-danger btn-sm" target="_blank">
+        <a href="@Url.Action("Pdf", "Export", new { revisionId = Model.RevisionId })" class="btn btn-outline-danger btn-sm" target="_blank">
             <i class="bi bi-file-pdf me-1"></i>PDF
         </a>
-        <a href="/Export/Excel/@Model.RevisionId" class="btn btn-outline-success btn-sm">
+        <a href="@Url.Action("Excel", "Export", new { revisionId = Model.RevisionId })" class="btn btn-outline-success btn-sm">
             <i class="bi bi-file-excel me-1"></i>Excel
         </a>
         <a href="@Url.Action("Revisions", new { id = Model.DesignId })"
@@ -195,7 +195,7 @@
             </div>
             <div id="threejsContainer" style="width:100%; height:calc(100% - 53px);"></div>
             <div style="position:absolute;bottom:10px;left:50%;transform:translateX(-50%);
-                        font-size:11px;color:rgba(255,255,255,.5);pointer-events:none;">
+                        font-size:11px;color:wheat;pointer-events:none;">
                 Drag to rotate &nbsp;·&nbsp; Scroll to zoom
             </div>
         </div>

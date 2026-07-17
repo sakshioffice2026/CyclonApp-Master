@@ -92,20 +92,6 @@ PDE_LOSS_WEIGHT = 1.0
 TURB_LOSS_WEIGHT = 1.0
 BC_LOSS_WEIGHT = 10.0
 
-# Direct aggregate mass-conservation regularizer (see _mass_flow_loss below).
-# Added on top of the pointwise continuity PDE residual because that single
-# residual term is heavily outweighed by the ~21 individually-weighted BC
-# residual terms above (each x BC_LOSS_WEIGHT=10) once summed, which lets
-# the network satisfy wall/axis/inlet/outlet BCs almost exactly while still
-# badly violating continuity in aggregate through the interior — exactly
-# the "passes wall/axis checks, fails Q(z) constancy" failure mode seen in
-# sanity_check.check_mass_conservation. This term computes Q(z) at several
-# cross-sections directly and penalizes it for deviating from its own mean,
-# giving continuity a much stronger, harder-to-ignore gradient signal.
-# Not yet empirically tuned relative to BC_LOSS_WEIGHT — start here, and
-# increase if Q(z) rel_spread is still high after training with this term.
-MASS_FLOW_LOSS_WEIGHT = 5.0
-
 OnProgressFn = Callable[[int, int, float], None]
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -271,82 +257,11 @@ def _bc_loss(model_fn, geometry: CycloneAxisymGeometry, v_inlet: torch.Tensor,
     # bc_losses values are ALREADY mean-squared (see assemble_bc_losses),
     # so we divide by scale**2 here, not scale, to non-dimensionalize them
     # the same way the PDE/turbulence residuals above are.
-    #
-    # ROOT-CAUSE FIX: this used to be a plain sum over all ~21 individual
-    # BC terms (5 wall + 5 axis + 5 inlet + 6 outlet, including the 8
-    # turbulence k/eps terms added when RANS was wired in). BC_LOSS_WEIGHT
-    # was tuned/"validated stable for the laminar case" against a smaller
-    # term count (13 terms, no k/eps BCs) — summing rather than averaging
-    # means the effective pull of "satisfy every BC" scales up every time a
-    # new BC term is added, growing to ~10*21=210 loss-units once turbulence
-    # BCs were included, versus ~6 units from the PDE/turbulence continuity
-    # residual and ~5 units from MASS_FLOW_LOSS_WEIGHT's dedicated Q(z)
-    # regularizer. That ~20x imbalance is why the network drives every
-    # pointwise BC (including the correct v_z_inlet target right at the
-    # inlet ring) to ~0 residual while continuity is still free to be badly
-    # violated in the interior — exactly the sanity_check.py Q(z) FAIL this
-    # was meant to fix. Averaging keeps BC_LOSS_WEIGHT's meaning independent
-    # of how many individual BC constraints happen to be enumerated.
     total = 0.0
     for key, mean_sq_residual in bc_losses.items():
         scale = _bc_residual_scale(key, scaler)
         total = total + mean_sq_residual / (scale ** 2)
-    return total / len(bc_losses)
-
-
-def _mass_flow_loss(
-    model,
-    scaler,
-    geometry: CycloneAxisymGeometry,
-    device: str,
-    n_planes: int = 8,
-    n_r: int = 64,
-) -> torch.Tensor:
-    """
-    Direct aggregate mass-conservation regularizer: computes the
-    volumetric flow Q(z) = 2*pi*integral(v_z * r dr) at several z
-    cross-sections spanning the barrel and cone (avoiding the inlet/outlet
-    end regions, where Q(z) is legitimately expected to change), and
-    penalizes each Q(z) for deviating from the batch's own mean. For a
-    divergence-free field with impermeable side walls, Q(z) must be
-    constant between the inlet and outlet boundaries — this term targets
-    that aggregate property directly, as a stronger complement to the
-    pointwise continuity PDE residual in _pde_and_turb_loss (see
-    MASS_FLOW_LOSS_WEIGHT's docstring above for why the pointwise
-    residual alone was insufficient — same quantity sanity_check.
-    check_mass_conservation independently measures on the trained grid).
-
-    Each z-plane integrates only out to that plane's TRUE local wall
-    radius (geometry.outer_wall_radius(z), which tapers linearly through
-    the cone), not a fixed r_barrel — integrating past the true wall would
-    evaluate the network outside the fluid domain (inside the solid cone
-    wall) and corrupt the Q(z) estimate with meaningless extrapolated
-    velocity, actively fighting the very constraint this term is meant to
-    enforce.
-    """
-    model_fn = model.as_model_fn(scaler)
-
-    z_planes = torch.linspace(
-        0.15 * geometry.total_height,
-        0.85 * geometry.total_height,
-        n_planes,
-        device=device,
-    )
-
-    q_values = []
-    for z in z_planes:
-        r_max = geometry.outer_wall_radius(z.unsqueeze(0)).squeeze(0)
-        r = torch.linspace(0.0, float(r_max), n_r, device=device, requires_grad=True)
-        zz = torch.full_like(r, float(z))
-
-        pred = model_fn(r, zz)
-        vz = pred["v_z"]
-        q = 2.0 * torch.pi * torch.trapz(vz * r, r)
-        q_values.append(q)
-
-    q_values = torch.stack(q_values)
-    target_q = q_values.mean().detach()
-    return ((q_values - target_q) / (target_q + 1e-9)).pow(2).mean()
+    return total
 
 
 def _total_loss(model, scaler, geometry, rho, nu, v_inlet, v_z_inlet, k_inlet, eps_inlet,
@@ -354,8 +269,7 @@ def _total_loss(model, scaler, geometry, rho, nu, v_inlet, v_z_inlet, k_inlet, e
     model_fn = model.as_model_fn(scaler)
     pde_turb = _pde_and_turb_loss(model_fn, geometry, rho, nu, scaler, n_interior, device)
     bc = _bc_loss(model_fn, geometry, v_inlet, v_z_inlet, k_inlet, eps_inlet, scaler, device)
-    mass = _mass_flow_loss(model, scaler, geometry, device)
-    return pde_turb + BC_LOSS_WEIGHT * bc + MASS_FLOW_LOSS_WEIGHT * mass
+    return pde_turb + BC_LOSS_WEIGHT * bc
 
 
 def train_field_model(
@@ -493,8 +407,7 @@ def train_field_model(
             )
         )
         bc = _bc_loss(model_fn, geometry, v_inlet_t, v_z_inlet_t, k_inlet_t, eps_inlet_t, scaler, device)
-        mass = _mass_flow_loss(model, scaler, geometry, device)
-        loss = pde_turb_loss + BC_LOSS_WEIGHT * bc + MASS_FLOW_LOSS_WEIGHT * mass
+        loss = pde_turb_loss + BC_LOSS_WEIGHT * bc
         loss.backward()
         closure_history["losses"].append(float(loss.item()))
         return loss
