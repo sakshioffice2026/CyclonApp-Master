@@ -67,7 +67,7 @@
                     <span>Export / Reports</span>
                 </a>
 
-                @if (User.IsInRole("SuperAdmin") || User.IsInRole("ClientAdmin"))
+            @*     @if (User.IsInRole("SuperAdmin") || User.IsInRole("ClientAdmin"))
                 {
                     <div class="nav-section-label mt-3">Administration</div>
                     <a class="sidebar-link @(ViewContext.RouteData.Values["controller"]?.ToString() == "Admin" ? "active" : "")"
@@ -87,7 +87,7 @@
                         <span>Users</span>
                     </a>
                 }
-            </nav>
+            </nav> *@
 
             <div class="sidebar-footer">
                 <a class="sidebar-link" href="@Url.Action("Profile","Account")">
