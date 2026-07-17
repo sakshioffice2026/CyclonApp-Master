@@ -92,6 +92,20 @@ PDE_LOSS_WEIGHT = 1.0
 TURB_LOSS_WEIGHT = 1.0
 BC_LOSS_WEIGHT = 10.0
 
+# Direct aggregate mass-conservation regularizer (see _mass_flow_loss below).
+# Added on top of the pointwise continuity PDE residual because that single
+# residual term is heavily outweighed by the ~21 individually-weighted BC
+# residual terms above (each x BC_LOSS_WEIGHT=10) once summed, which lets
+# the network satisfy wall/axis/inlet/outlet BCs almost exactly while still
+# badly violating continuity in aggregate through the interior — exactly
+# the "passes wall/axis checks, fails Q(z) constancy" failure mode seen in
+# sanity_check.check_mass_conservation. This term computes Q(z) at several
+# cross-sections directly and penalizes it for deviating from its own mean,
+# giving continuity a much stronger, harder-to-ignore gradient signal.
+# Not yet empirically tuned relative to BC_LOSS_WEIGHT — start here, and
+# increase if Q(z) rel_spread is still high after training with this term.
+MASS_FLOW_LOSS_WEIGHT = 5.0
+
 OnProgressFn = Callable[[int, int, float], None]
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -231,15 +245,7 @@ def _pde_and_turb_loss(model_fn, geometry: CycloneAxisymGeometry, rho: torch.Ten
                         nu: torch.Tensor, scaler: FieldScaler, n_interior: int,
                         device: str) -> torch.Tensor:
     r, z = _sample_interior_away_from_axis(geometry, n_interior, device)
-    # k_floor (root-cause fix, see field_turbulence.rans_field_residuals
-    # docstring): guards the eps-equation's k denominator from blowing up
-    # when an early/adversarial collocation point has softplus(k) underflow
-    # near 0 while eps is still O(its own scale) -- confirmed by hand
-    # calculation to produce single-point residuals of ~1e24-1e27, matching
-    # real observed loss blowups (~1e22) in training runs that never
-    # converged. Scaled to this design's own K (=U^2), not an absolute
-    # constant, so it adapts to any cyclone size/velocity.
-    res = rans_field_residuals(model_fn, r, z, rho, nu, k_floor=1e-6 * scaler.K)
+    res = rans_field_residuals(model_fn, r, z, rho, nu)
     scales = _pde_residual_scales(scaler)
     pde = (
         (res["continuity"] / scales["continuity"]) ** 2
@@ -272,12 +278,68 @@ def _bc_loss(model_fn, geometry: CycloneAxisymGeometry, v_inlet: torch.Tensor,
     return total
 
 
+def _mass_flow_loss(
+    model,
+    scaler,
+    geometry: CycloneAxisymGeometry,
+    device: str,
+    n_planes: int = 8,
+    n_r: int = 64,
+) -> torch.Tensor:
+    """
+    Direct aggregate mass-conservation regularizer: computes the
+    volumetric flow Q(z) = 2*pi*integral(v_z * r dr) at several z
+    cross-sections spanning the barrel and cone (avoiding the inlet/outlet
+    end regions, where Q(z) is legitimately expected to change), and
+    penalizes each Q(z) for deviating from the batch's own mean. For a
+    divergence-free field with impermeable side walls, Q(z) must be
+    constant between the inlet and outlet boundaries — this term targets
+    that aggregate property directly, as a stronger complement to the
+    pointwise continuity PDE residual in _pde_and_turb_loss (see
+    MASS_FLOW_LOSS_WEIGHT's docstring above for why the pointwise
+    residual alone was insufficient — same quantity sanity_check.
+    check_mass_conservation independently measures on the trained grid).
+
+    Each z-plane integrates only out to that plane's TRUE local wall
+    radius (geometry.outer_wall_radius(z), which tapers linearly through
+    the cone), not a fixed r_barrel — integrating past the true wall would
+    evaluate the network outside the fluid domain (inside the solid cone
+    wall) and corrupt the Q(z) estimate with meaningless extrapolated
+    velocity, actively fighting the very constraint this term is meant to
+    enforce.
+    """
+    model_fn = model.as_model_fn(scaler)
+
+    z_planes = torch.linspace(
+        0.15 * geometry.total_height,
+        0.85 * geometry.total_height,
+        n_planes,
+        device=device,
+    )
+
+    q_values = []
+    for z in z_planes:
+        r_max = geometry.outer_wall_radius(z.unsqueeze(0)).squeeze(0)
+        r = torch.linspace(0.0, float(r_max), n_r, device=device, requires_grad=True)
+        zz = torch.full_like(r, float(z))
+
+        pred = model_fn(r, zz)
+        vz = pred["v_z"]
+        q = 2.0 * torch.pi * torch.trapz(vz * r, r)
+        q_values.append(q)
+
+    q_values = torch.stack(q_values)
+    target_q = q_values.mean().detach()
+    return ((q_values - target_q) / (target_q + 1e-9)).pow(2).mean()
+
+
 def _total_loss(model, scaler, geometry, rho, nu, v_inlet, v_z_inlet, k_inlet, eps_inlet,
                  n_interior: int, device: str) -> torch.Tensor:
     model_fn = model.as_model_fn(scaler)
     pde_turb = _pde_and_turb_loss(model_fn, geometry, rho, nu, scaler, n_interior, device)
     bc = _bc_loss(model_fn, geometry, v_inlet, v_z_inlet, k_inlet, eps_inlet, scaler, device)
-    return pde_turb + BC_LOSS_WEIGHT * bc
+    mass = _mass_flow_loss(model, scaler, geometry, device)
+    return pde_turb + BC_LOSS_WEIGHT * bc + MASS_FLOW_LOSS_WEIGHT * mass
 
 
 def train_field_model(
@@ -400,11 +462,7 @@ def train_field_model(
     def closure():
         optimizer_lbfgs.zero_grad(set_to_none=True)
         model_fn = model.as_model_fn(scaler)
-        # Same k_floor protection as the Adam phase (see
-        # field_turbulence.rans_field_residuals docstring) -- this call
-        # site was missing it, leaving the L-BFGS phase equally exposed to
-        # the eps-equation k-underflow blowup.
-        res = rans_field_residuals(model_fn, r_fixed, z_fixed, rho_t, nu_t, k_floor=1e-6 * scaler.K)
+        res = rans_field_residuals(model_fn, r_fixed, z_fixed, rho_t, nu_t)
         scales = _pde_residual_scales(scaler)
         pde_turb_loss = (
             PDE_LOSS_WEIGHT * (
@@ -419,7 +477,8 @@ def train_field_model(
             )
         )
         bc = _bc_loss(model_fn, geometry, v_inlet_t, v_z_inlet_t, k_inlet_t, eps_inlet_t, scaler, device)
-        loss = pde_turb_loss + BC_LOSS_WEIGHT * bc
+        mass = _mass_flow_loss(model, scaler, geometry, device)
+        loss = pde_turb_loss + BC_LOSS_WEIGHT * bc + MASS_FLOW_LOSS_WEIGHT * mass
         loss.backward()
         closure_history["losses"].append(float(loss.item()))
         return loss

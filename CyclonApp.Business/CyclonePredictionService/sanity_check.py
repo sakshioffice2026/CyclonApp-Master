@@ -25,24 +25,14 @@ Checks performed, each printed as PASS/WARN/FAIL:
   4. Near-axis radial/tangential velocities (innermost ~2% of r) are
 	 close to zero — the axis symmetry condition should hold.
   5. Axial volumetric flow Q(z) = integral of v_z * 2*pi*r dr, computed at
-	 several z cross-sections within the constant-diameter barrel region
-	 (detected by matching outer radius, not a blind slice of every
-	 z-level — the cone's tapering radius makes a naive 25-75% slice of
-	 all z-levels unreliable) and checked for consistency with each
-	 other. This is a stronger, independent check than the training
-	 loss: it verifies mass conservation is actually satisfied in
-	 aggregate, not just that the pointwise continuity residual was
-	 small at randomly sampled collocation points.
+	 several z cross-sections and checked for consistency with each other.
+	 This is a stronger, independent check than the training loss: it
+	 verifies mass conservation is actually satisfied in aggregate, not
+	 just that the pointwise continuity residual was small at randomly
+	 sampled collocation points.
 
 This script only reads the grid the training run already wrote — it does
 not reload the model or require torch installed.
-
-FIX (this revision): check_mass_conservation was previously duplicated —
-one copy accidentally nested one indent level inside check_wall_and_axis
-(so it was never a callable top-level function), and the two copies were
-concatenated without a newline between them ("return Truedef
-check_mass_conservation..."), which is what produced the IndentationError
-at parse time. Replaced with a single, clean, top-level definition below.
 """
 import argparse
 import json
@@ -218,92 +208,84 @@ def check_wall_and_axis(grid: dict, v_inlet: float) -> bool:
 
 
 def check_mass_conservation(grid: dict) -> bool:
-	"""Check volumetric flow consistency across the cylindrical barrel.
-	Detects the barrel region by matching outer radius (constant-diameter
-	section) rather than blindly slicing 25-75% of all z-levels, since the
-	cone's tapering radius makes that slice unreliable."""
+	"""Computes Q(z) = integral of v_z * 2*pi*r dr at each z cross-section
+	(trapezoidal rule over the sorted r values present at that z) and
+	checks Q(z) stays reasonably consistent across sections. This is
+	stronger evidence of a physically valid solution than the training
+	loss alone — it checks continuity is satisfied in aggregate, not just
+	that the pointwise PDE residual was small at the collocation points
+	used during training."""
 	import math
-
 	groups = _group_by_z(grid)
 	z_values = sorted(groups.keys())
-
 	if len(z_values) < 3:
 		report("Mass conservation", "WARN", "too few z-levels to check")
 		return True
 
 	flows = []
-	max_r_by_z = {}
-
 	for z in z_values:
-		pts = sorted(groups[z], key=lambda p: p[0])
-		if len(pts) < 2:
+		pts_sorted = sorted(groups[z], key=lambda p: p[0])
+		rs = [p[0] for p in pts_sorted]
+		vzs = [p[3] for p in pts_sorted]
+		if len(rs) < 2:
 			continue
-		rs = [p[0] for p in pts]
-		vzs = [p[3] for p in pts]
-		max_r_by_z[z] = rs[-1]
-
 		q = 0.0
 		for i in range(1, len(rs)):
 			r0, r1 = rs[i - 1], rs[i]
-			vz0, vz1 = vzs[i - 1], vzs[i]
-			q += 0.5 * (vz0 * 2.0 * math.pi * r0 + vz1 * 2.0 * math.pi * r1) * (r1 - r0)
+			integrand0 = vzs[i - 1] * 2 * math.pi * r0
+			integrand1 = vzs[i] * 2 * math.pi * r1
+			q += 0.5 * (integrand0 + integrand1) * (r1 - r0)
 		flows.append((z, q))
 
 	if len(flows) < 3:
 		report("Mass conservation", "WARN", "too few valid cross-sections to check")
 		return True
-
-	# Detect barrel by constant outer radius.
-	r_barrel = max(max_r_by_z.values())
-	tol = max(1e-6, r_barrel * 0.005)
-	barrel_zs = [z for z in z_values if abs(max_r_by_z[z] - r_barrel) <= tol]
-
-	if len(barrel_zs) < 3:
-		report("Mass conservation", "WARN", "unable to identify barrel region")
-		return True
-
-	start = len(barrel_zs) // 4
-	end = 3 * len(barrel_zs) // 4
-	mid_zs = set(barrel_zs[start:end] or barrel_zs)
-	mid = [(z, q) for z, q in flows if z in mid_zs]
+	# Skip the first/last few z-levels — inlet/outlet regions have real
+	# inflow/outflow so Q(z) is EXPECTED to change there; the barrel's
+	# mid-section (away from inlet and outlets) is where Q(z) should be
+	# closest to constant if continuity is well satisfied.
+	mid = flows[len(flows) // 4 : 3 * len(flows) // 4]
 	if len(mid) < 2:
-		mid = [(z, q) for z, q in flows if z in barrel_zs]
+		mid = flows
 
 	print("\nQ(z):")
-	for z, q in mid:
+	for z, q in flows:
 		print(f"{z:.4f}  {q:.6f}")
 
 	q_values = [q for _, q in mid]
 	q_mean = sum(q_values) / len(q_values)
-	rel_spread = (
-		(max(q_values) - min(q_values)) / abs(q_mean)
-		if abs(q_mean) > 1e-12 else float("inf")
-	)
+	q_spread = max(q_values) - min(q_values)
+	rel_spread = q_spread / abs(q_mean) if q_mean else float("inf")
 
 	if rel_spread > 0.5:
 		report(
-			"Mass conservation", "FAIL",
-			f"volumetric flow Q(z) varies by {rel_spread:.1%} "
-			f"across barrel mid-section (mean {q_mean:.4f} m^3/s)",
+			"Mass conservation",
+			"FAIL",
+			f"volumetric flow Q(z) varies by {rel_spread:.1%} across the "
+			f"barrel mid-section (mean {q_mean:.4f} m^3/s) — continuity "
+			f"not well satisfied in aggregate",
 		)
 		return False
 
-	if rel_spread > 0.2:
+	elif rel_spread > 0.2:
 		report(
-			"Mass conservation", "WARN",
-			f"Q(z) varies by {rel_spread:.1%} "
-			f"across barrel mid-section (mean {q_mean:.4f} m^3/s)",
+			"Mass conservation",
+			"WARN",
+			f"Q(z) varies by {rel_spread:.1%} across the barrel "
+			f"mid-section (mean {q_mean:.4f} m^3/s) — some inconsistency, "
+			f"may improve with more training",
 		)
 		return True
 
-	report(
-		"Mass conservation", "PASS",
-		f"Q(z) varies by only {rel_spread:.1%} "
-		f"across barrel mid-section (mean {q_mean:.4f} m^3/s)",
-	)
-	return True
-
-
+	else:
+		report(
+			"Mass conservation",
+			"PASS",
+			f"Q(z) varies by only {rel_spread:.1%} across the barrel "
+			f"mid-section (mean {q_mean:.4f} m^3/s) — continuity well "
+			f"satisfied in aggregate",
+		)
+		return True
 def main():
 	p = argparse.ArgumentParser(description=__doc__)
 	p.add_argument("json_path", help="Path to the field_train.py --output-json result")

@@ -1,4 +1,4 @@
-﻿"""
+"""
 app.py
 ──────
 FastAPI wrapper around the trained CyclonePINN, plus async job endpoints

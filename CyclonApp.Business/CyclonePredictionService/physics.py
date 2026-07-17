@@ -1,4 +1,4 @@
-"""
+﻿"""
 physics.py
 ──────────
 A PyTorch re-implementation of the exact closed-form relationships already
