@@ -264,3 +264,33 @@ def inlet_velocity_ms(flow_cfm: torch.Tensor, inlet_height_m: torch.Tensor,
     q_m3s = flow_cfm * CFM_TO_M3S
     area = inlet_height_m * inlet_width_m + EPS
     return q_m3s / area
+
+
+def inlet_axial_velocity_ms(flow_cfm: torch.Tensor, r_barrel_m: float,
+                             r_exhaust_m: float) -> torch.Tensor:
+    """
+    ROOT-CAUSE FIX (see field_boundary_conditions.inlet_ring_residual):
+    the inlet ring BC previously prescribed v_z = 0, meaning no mass ever
+    entered the domain through the one boundary meant to represent the
+    inlet — nothing in the physics/BC setup tied the trained field to the
+    actual design flow rate, so the network was free to converge to an
+    internally-inconsistent field (confirmed: integrated Q(z) varied 69%
+    across the barrel/cone, when it must be constant for a divergence-free
+    field with impermeable walls). This computes the axial inflow velocity
+    needed so that integrating v_z over the inlet ring's annular
+    cross-section (pi * (r_barrel^2 - r_exhaust^2)) reproduces the actual
+    design volumetric flow rate:
+
+        v_z_inlet * pi * (r_barrel^2 - r_exhaust^2) = Q_total
+
+    This is a real physical mass-injection velocity, not the same number
+    as inlet_velocity_ms (which is Q / real-duct-area — the real 3D duct's
+    physical cross-section is much smaller than this axisymmetric ring's
+    full-circumference area, so the equivalent smeared axial velocity is
+    correspondingly smaller; this is the expected/correct effect of
+    azimuthally smearing a localized 3D inlet jet into an axisymmetric
+    ring, not an error).
+    """
+    q_m3s = flow_cfm * CFM_TO_M3S
+    ring_area = math.pi * (r_barrel_m ** 2 - r_exhaust_m ** 2) + EPS
+    return q_m3s / ring_area

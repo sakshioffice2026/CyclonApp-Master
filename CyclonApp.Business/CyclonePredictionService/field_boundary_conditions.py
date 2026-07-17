@@ -14,9 +14,15 @@ where each surface is sampled):
                                                         d(v_z)/dr = 0
   Inlet ring (z = 0,
     r in [r_exhaust, r_barrel]) : prescribed swirl -> v_theta = v_inlet,
-                                                        v_r = 0, v_z = 0
+                                                        v_r = 0,
+                                                        v_z = v_z_inlet
                                 (tangential-entry approximation — see
-                                 field_physics.sample_inlet_ring docstring)
+                                 field_physics.sample_inlet_ring docstring.
+                                 v_z_inlet is a physically-derived non-zero
+                                 axial inflow, see
+                                 field_physics.inlet_axial_velocity_ms —
+                                 without it, no mass ever enters the domain
+                                 through this boundary.)
   Bottom outlet (dust exit)  : pressure reference,  -> p = 0 (gauge),
     Top exhaust outlet          zero-gradient outflow  d(v_r)/dz = d(v_theta)/dz
                                                         = d(v_z)/dz = 0
@@ -67,18 +73,25 @@ def axis_symmetry_residual(model_fn, r: torch.Tensor, z: torch.Tensor) -> dict[s
 
 def inlet_ring_residual(model_fn, r: torch.Tensor, z: torch.Tensor,
                          v_inlet: torch.Tensor,
+                         v_z_inlet: torch.Tensor,
                          k_inlet: torch.Tensor,
                          eps_inlet: torch.Tensor) -> dict[str, torch.Tensor]:
     """
-    v_inlet: tangential inlet speed (m/s). k_inlet, eps_inlet: turbulence
-    quantities from field_turbulence.inlet_turbulence_quantities. Each may
-    be a scalar (broadcast) or one value per point.
+    v_inlet: tangential inlet speed (m/s) — swirl momentum injection.
+    v_z_inlet: axial inflow speed (m/s), see
+        field_physics.inlet_axial_velocity_ms — this is the mass-injection
+        fix; previously v_z was targeted at 0 here, which meant no net mass
+        ever entered the domain through this boundary (root cause of the
+        Q(z) mass-conservation failure — see field_physics.py docstring).
+    k_inlet, eps_inlet: turbulence quantities from
+        field_turbulence.inlet_turbulence_quantities.
+    Each may be a scalar (broadcast) or one value per point.
     """
     out = model_fn(r, z)
     return {
         "inlet_vtheta": out["v_theta"] - v_inlet,
         "inlet_vr": out["v_r"],
-        "inlet_vz": out["v_z"],
+        "inlet_vz": out["v_z"] - v_z_inlet,
         "inlet_k": out["k"] - k_inlet,
         "inlet_eps": out["eps"] - eps_inlet,
     }
@@ -105,6 +118,7 @@ def assemble_bc_losses(
     model_fn,
     geometry,
     v_inlet: torch.Tensor,
+    v_z_inlet: torch.Tensor,
     k_inlet: torch.Tensor,
     eps_inlet: torch.Tensor,
     n_wall: int = 256,
@@ -132,13 +146,16 @@ def assemble_bc_losses(
     v_inlet_pt = v_inlet if torch.is_tensor(v_inlet) else torch.full((n_inlet,), float(v_inlet), device=device)
     if v_inlet_pt.numel() == 1:
         v_inlet_pt = v_inlet_pt.expand(n_inlet)
+    v_z_inlet_pt = v_z_inlet if torch.is_tensor(v_z_inlet) else torch.full((n_inlet,), float(v_z_inlet), device=device)
+    if v_z_inlet_pt.numel() == 1:
+        v_z_inlet_pt = v_z_inlet_pt.expand(n_inlet)
     k_inlet_pt = k_inlet if torch.is_tensor(k_inlet) else torch.full((n_inlet,), float(k_inlet), device=device)
     if k_inlet_pt.numel() == 1:
         k_inlet_pt = k_inlet_pt.expand(n_inlet)
     eps_inlet_pt = eps_inlet if torch.is_tensor(eps_inlet) else torch.full((n_inlet,), float(eps_inlet), device=device)
     if eps_inlet_pt.numel() == 1:
         eps_inlet_pt = eps_inlet_pt.expand(n_inlet)
-    for k, v in inlet_ring_residual(model_fn, r_i, z_i, v_inlet_pt, k_inlet_pt, eps_inlet_pt).items():
+    for k, v in inlet_ring_residual(model_fn, r_i, z_i, v_inlet_pt, v_z_inlet_pt, k_inlet_pt, eps_inlet_pt).items():
         losses[k] = (v ** 2).mean()
 
     r_bo, z_bo = geometry.sample_bottom_outlet(n_outlet, device=device)

@@ -65,6 +65,7 @@ from field_physics import (
     geometry_from_dimensions_mm,
     fluid_properties,
     inlet_velocity_ms,
+    inlet_axial_velocity_ms,
 )
 from field_turbulence import (
     rans_field_residuals,
@@ -250,9 +251,9 @@ def _pde_and_turb_loss(model_fn, geometry: CycloneAxisymGeometry, rho: torch.Ten
 
 
 def _bc_loss(model_fn, geometry: CycloneAxisymGeometry, v_inlet: torch.Tensor,
-             k_inlet: torch.Tensor, eps_inlet: torch.Tensor, scaler: FieldScaler,
-             device: str) -> torch.Tensor:
-    bc_losses = assemble_bc_losses(model_fn, geometry, v_inlet, k_inlet, eps_inlet, device=device)
+             v_z_inlet: torch.Tensor, k_inlet: torch.Tensor, eps_inlet: torch.Tensor,
+             scaler: FieldScaler, device: str) -> torch.Tensor:
+    bc_losses = assemble_bc_losses(model_fn, geometry, v_inlet, v_z_inlet, k_inlet, eps_inlet, device=device)
     # bc_losses values are ALREADY mean-squared (see assemble_bc_losses),
     # so we divide by scale**2 here, not scale, to non-dimensionalize them
     # the same way the PDE/turbulence residuals above are.
@@ -263,11 +264,11 @@ def _bc_loss(model_fn, geometry: CycloneAxisymGeometry, v_inlet: torch.Tensor,
     return total
 
 
-def _total_loss(model, scaler, geometry, rho, nu, v_inlet, k_inlet, eps_inlet,
+def _total_loss(model, scaler, geometry, rho, nu, v_inlet, v_z_inlet, k_inlet, eps_inlet,
                  n_interior: int, device: str) -> torch.Tensor:
     model_fn = model.as_model_fn(scaler)
     pde_turb = _pde_and_turb_loss(model_fn, geometry, rho, nu, scaler, n_interior, device)
-    bc = _bc_loss(model_fn, geometry, v_inlet, k_inlet, eps_inlet, scaler, device)
+    bc = _bc_loss(model_fn, geometry, v_inlet, v_z_inlet, k_inlet, eps_inlet, scaler, device)
     return pde_turb + BC_LOSS_WEIGHT * bc
 
 
@@ -276,6 +277,7 @@ def train_field_model(
     rho: float,
     nu: float,
     v_inlet: float,
+    v_z_inlet: float,
     k_inlet: float,
     eps_inlet: float,
     epochs_adam: int = 3000,
@@ -301,6 +303,10 @@ def train_field_model(
         geometry: fluid domain (see field_physics.geometry_from_dimensions_mm)
         rho, nu: fluid density (kg/m3) and kinematic (molecular) viscosity (m2/s)
         v_inlet: inlet tangential velocity (m/s), see field_physics.inlet_velocity_ms
+        v_z_inlet: inlet axial (mass-carrying) velocity (m/s), see
+            field_physics.inlet_axial_velocity_ms — this is what actually
+            ties the trained field to the design flow rate; see the
+            root-cause note in field_physics.py / field_boundary_conditions.py.
         k_inlet, eps_inlet: inlet turbulence kinetic energy (m2/s2) and
             dissipation rate (m2/s3), see field_turbulence.inlet_turbulence_quantities
         epochs_adam: Adam phase epoch count
@@ -331,6 +337,7 @@ def train_field_model(
     rho_t = torch.as_tensor(float(rho), device=device)
     nu_t = torch.as_tensor(float(nu), device=device)
     v_inlet_t = torch.as_tensor(float(v_inlet), device=device)
+    v_z_inlet_t = torch.as_tensor(float(v_z_inlet), device=device)
     k_inlet_t = torch.as_tensor(float(k_inlet), device=device)
     eps_inlet_t = torch.as_tensor(float(eps_inlet), device=device)
 
@@ -354,7 +361,7 @@ def train_field_model(
 
     for epoch in range(1, epochs_adam + 1):
         optimizer.zero_grad(set_to_none=True)
-        loss = _total_loss(model, scaler, geometry, rho_t, nu_t, v_inlet_t,
+        loss = _total_loss(model, scaler, geometry, rho_t, nu_t, v_inlet_t, v_z_inlet_t,
                             k_inlet_t, eps_inlet_t, n_interior, device)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
@@ -399,7 +406,7 @@ def train_field_model(
                 + ((res["eps_equation"] / scales["eps_equation"]) ** 2).mean()
             )
         )
-        bc = _bc_loss(model_fn, geometry, v_inlet_t, k_inlet_t, eps_inlet_t, scaler, device)
+        bc = _bc_loss(model_fn, geometry, v_inlet_t, v_z_inlet_t, k_inlet_t, eps_inlet_t, scaler, device)
         loss = pde_turb_loss + BC_LOSS_WEIGHT * bc
         loss.backward()
         closure_history["losses"].append(float(loss.item()))
@@ -519,6 +526,16 @@ def run_field_prediction_job(
         torch.tensor([inlet_width_mm * 1e-3]),
     ).item()
 
+    # Root-cause fix: the axial mass-injection velocity that actually ties
+    # the trained field to flow_rate_cfm — see
+    # field_physics.inlet_axial_velocity_ms and the Q(z) mass-conservation
+    # note in field_boundary_conditions.py.
+    v_z_inlet = inlet_axial_velocity_ms(
+        torch.tensor([flow_rate_cfm]),
+        r_barrel_m=geometry.r_barrel,
+        r_exhaust_m=geometry.r_exhaust,
+    ).item()
+
     hydraulic_diameter_m = hydraulic_diameter_rect_m(
         height_m=inlet_height_mm * 1e-3, width_m=inlet_width_mm * 1e-3,
     )
@@ -530,7 +547,7 @@ def run_field_prediction_job(
     k_inlet, eps_inlet = k_inlet_t.item(), eps_inlet_t.item()
 
     model, scaler, history = train_field_model(
-        geometry, rho, nu, v_inlet, k_inlet, eps_inlet,
+        geometry, rho, nu, v_inlet, v_z_inlet, k_inlet, eps_inlet,
         epochs_adam=epochs_adam,
         epochs_lbfgs=epochs_lbfgs,
         on_progress=on_progress,
@@ -544,6 +561,7 @@ def run_field_prediction_job(
         "rho": rho,
         "nu": nu,
         "v_inlet": v_inlet,
+        "v_z_inlet": v_z_inlet,
         "k_inlet": k_inlet,
         "eps_inlet": eps_inlet,
         "model": model,
@@ -655,7 +673,7 @@ def main(argv: Optional[list] = None) -> None:
     grid = result["grid"]
     print("\n── Done ──────────────────────────────────────────────")
     print(f"rho={result['rho']:.5f} kg/m3  nu={result['nu']:.3e} m2/s  "
-          f"v_inlet={result['v_inlet']:.4f} m/s")
+          f"v_inlet={result['v_inlet']:.4f} m/s  v_z_inlet={result['v_z_inlet']:.4f} m/s")
     print(f"k_inlet={result['k_inlet']:.5e} m2/s2  eps_inlet={result['eps_inlet']:.5e} m2/s3")
     print(f"final_loss={history['final_loss']:.6e}  "
           f"wall_time_s={history['wall_time_s']:.1f}")
