@@ -178,7 +178,10 @@ namespace CyclonApp.Repositories.Repositories
                     PressurePa = wire.Result.PressurePa,
                     RhoKgm3 = wire.Result.RhoKgm3,
                     NuM2s = wire.Result.NuM2s,
-                    VInletMs = wire.Result.VInletMs
+                    VInletMs = wire.Result.VInletMs,
+                    MassConservationStatus = wire.Result.MassConservationStatus,
+                    MassFlowSpread = wire.Result.MassFlowSpread,
+                    FinalLoss = wire.Result.FinalLoss
                 },
                 // Unix seconds (float, matches Python's time.time()) -> UTC DateTime.
                 CreatedAtUtc = wire.CreatedAtUnix.HasValue
@@ -271,6 +274,13 @@ namespace CyclonApp.Repositories.Repositories
             public double RhoKgm3 { get; set; }
             public double NuM2s { get; set; }
             public double VInletMs { get; set; }
+
+            // Optional — nullable so a response missing these (older
+            // service version, or a run that didn't compute them) still
+            // deserializes cleanly instead of throwing.
+            public string? MassConservationStatus { get; set; }
+            public double? MassFlowSpread { get; set; }
+            public double? FinalLoss { get; set; }
         }
     }
 }

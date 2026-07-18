@@ -77,7 +77,28 @@ namespace CyclonApp.Model.DTOs
 
         [JsonPropertyName("vInletMs")]
         public double VInletMs { get; set; }
-    }
 
+        // ── Mass-conservation diagnostics ────────────────────────────────
+        // Nullable: older/unmodified Python service responses (or a
+        // failed/partial solve) may omit these entirely. Treating them as
+        // optional means System.Text.Json simply leaves them null instead
+        // of throwing, so existing grid-array deserialization (RMeters,
+        // VRMs, VInletMs, etc.) is unaffected either way.
+
+        /// <summary>e.g. "ok" | "warning" | "failed" — solver's own verdict
+        /// on how well mass was conserved across the field.</summary>
+        [JsonPropertyName("massConservationStatus")]
+        public string? MassConservationStatus { get; set; }
+
+        /// <summary>Spread/variance of mass flow across the solved field
+        /// (units as defined by the Python service, typically kg/s or a
+        /// dimensionless ratio — treat as opaque unless documented).</summary>
+        [JsonPropertyName("massFlowSpread")]
+        public double? MassFlowSpread { get; set; }
+
+        /// <summary>Final training/solver loss value at convergence.</summary>
+        [JsonPropertyName("finalLoss")]
+        public double? FinalLoss { get; set; }
+    }
 
 }
