@@ -66,6 +66,7 @@ from field_physics import (
     fluid_properties,
     inlet_velocity_ms,
     inlet_axial_velocity_ms,
+    gas_type_to_onehot,
 )
 from field_turbulence import (
     rans_field_residuals,
@@ -73,7 +74,6 @@ from field_turbulence import (
     hydraulic_diameter_rect_m,
 )
 from field_boundary_conditions import assemble_bc_losses
-from physics import gas_type_to_onehot
 
 # ─────────────────────────────────────────────────────────────────────────
 # Loss term weights. PDE residuals, BC residuals, and now the k/epsilon
@@ -560,7 +560,7 @@ def run_field_prediction_job(
             field_turbulence.hydraulic_diameter_rect_m /
             inlet_turbulence_quantities
         operating_temp_c, operating_press_kpa, gas_type: process conditions,
-            see field_physics.fluid_properties / physics.gas_type_to_onehot
+            see field_physics.fluid_properties / field_physics.gas_type_to_onehot
         epochs_adam, epochs_lbfgs: forwarded to train_field_model
         on_progress: forwarded to train_field_model
         **train_kwargs: any other train_field_model kwarg (n_interior,

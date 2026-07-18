@@ -26,16 +26,76 @@ z-momentum:
 
 Known, documented limitation: this is LAMINAR. Cyclone flow is turbulent;
 a RANS closure is deferred to a later phase (see CyclonApp area notes).
-Reuses physics.py's sutherland_viscosity / ideal_gas_density so the fluid
-properties used here agree exactly with the rest of the service.
+
+FLUID-PROPERTY / UNIT-CONVERSION CONSTANTS (absorbed from the now-deleted
+physics.py): sutherland_viscosity, ideal_gas_density, gas_type_to_onehot,
+IN_TO_M, and CFM_TO_M3S used to live in physics.py, shared with the old
+scalar CyclonePINN correction-model path (model.py/dataset.py/train.py).
+That path is retired — only lapple_forward() was specific to it, so it was
+NOT carried over. Everything below is otherwise byte-for-byte identical to
+the physics.py originals, so values still agree exactly with the rest of
+the service (and with CyclonCalculationRepository.cs's own Sutherland/
+ideal-gas math, which this remains a faithful torch port of).
 """
 from __future__ import annotations
 import math
 import torch
 
-from physics import sutherland_viscosity, ideal_gas_density, IN_TO_M, CFM_TO_M3S
-
 EPS = 1e-9
+
+GAS_TYPES = ["AIR", "N2", "CO2"]  # FLUEGAS maps to CO2 constants, same as C#
+
+# Sutherland constants: mu0 (Pa.s), T0 (K), C (K)
+_SUTHERLAND = {
+    "AIR": (1.716e-5, 273.15, 110.4),
+    "N2":  (1.663e-5, 273.15, 107.0),
+    "CO2": (1.370e-5, 273.15, 222.0),
+}
+# Molar mass (kg/mol)
+_MOLAR_MASS = {
+    "AIR": 0.02897,
+    "N2":  0.02801,
+    "CO2": 0.04401,
+}
+
+R_GAS = 8.314  # J/(mol.K)
+
+IN_TO_M = 0.0254
+CFM_TO_M3S = 0.000471947
+
+
+def _gas_lookup(table: dict, gas_onehot: torch.Tensor) -> torch.Tensor:
+    """gas_onehot: (N,3) one-hot over GAS_TYPES -> weighted constant per row."""
+    values = torch.tensor([table[g] for g in GAS_TYPES], dtype=gas_onehot.dtype,
+                           device=gas_onehot.device)
+    return gas_onehot @ values
+
+
+def sutherland_viscosity(temp_c: torch.Tensor, gas_onehot: torch.Tensor) -> torch.Tensor:
+    T = temp_c + 273.15
+    mu0 = _gas_lookup({k: v[0] for k, v in _SUTHERLAND.items()}, gas_onehot)
+    T0 = _gas_lookup({k: v[1] for k, v in _SUTHERLAND.items()}, gas_onehot)
+    C = _gas_lookup({k: v[2] for k, v in _SUTHERLAND.items()}, gas_onehot)
+    return mu0 * (T / T0) ** 1.5 * ((T0 + C) / (T + C))
+
+
+def ideal_gas_density(temp_c: torch.Tensor, press_kpa: torch.Tensor,
+                       gas_onehot: torch.Tensor) -> torch.Tensor:
+    T = temp_c + 273.15
+    P = press_kpa * 1000.0
+    M = _gas_lookup(_MOLAR_MASS, gas_onehot)
+    return (P * M) / (R_GAS * T)
+
+
+def gas_type_to_onehot(gas_type: str) -> list[float]:
+    g = (gas_type or "AIR").upper()
+    if g in ("FLUEGAS",):
+        g = "CO2"
+    if g in ("NITROGEN",):
+        g = "N2"
+    if g not in GAS_TYPES:
+        g = "AIR"
+    return [1.0 if g == gt else 0.0 for gt in GAS_TYPES]
 
 
 # ─────────────────────────────────────────────────────────────────────────
