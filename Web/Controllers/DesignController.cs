@@ -19,25 +19,29 @@ public class DesignController : Controller
     private readonly ICyclonCalculation _calculationRepository;
     private readonly ICyclonePrediction _predictionRepository;
     private readonly ILogger<DesignController> _logger;
+    private readonly IEngineeringInsight _engineeringInsight;
     public readonly IUnitOfWork _uow;
+
 
     private static readonly JsonSerializerOptions _jsonOpts =
         new() { PropertyNameCaseInsensitive = true };
 
     public DesignController(
-        IDesignRepository designRepository,
-        IAccount accountRepository,
-        ITenant tenantRepository,
-        ICyclonCalculation calculationRepository,
-        ICyclonePrediction predictionRepository,
-        ILogger<DesignController> logger,
-        IUnitOfWork uow)
+    IDesignRepository designRepository,
+    IAccount accountRepository,
+    ITenant tenantRepository,
+    ICyclonCalculation calculationRepository,
+    ICyclonePrediction predictionRepository,
+    IEngineeringInsight engineeringInsight,
+    ILogger<DesignController> logger,
+    IUnitOfWork uow)
     {
         _designRepository = designRepository;
         _accountRepository = accountRepository;
         _tenantRepository = tenantRepository;
         _calculationRepository = calculationRepository;
         _predictionRepository = predictionRepository;
+        _engineeringInsight = engineeringInsight;
         _logger = logger;
         _uow = uow;
     }

@@ -1,0 +1,102 @@
+﻿@* Renders into a container the results page already has for the field-prediction
+   job (e.g. inside the same panel that polls FieldPredictionStatus). Expects
+   window.renderEngineeringInsights(insights) to be called with the "Insights"
+   object from the FieldPredictionStatus JSON response once status is "completed". *@
+
+<div id="engineering-insights-panel" style="display:none; margin-top:24px; font-family:inherit;">
+    <h3>AI Engineering Insights</h3>
+
+    <div id="ei-health-score" style="font-size:2em; font-weight:bold;"></div>
+    <div id="ei-grade" style="margin-bottom:16px;"></div>
+
+    <div id="ei-physics-validation" style="margin-bottom:16px;">
+        <h4>Physics Validation</h4>
+        <div id="ei-physics-items"></div>
+        <div id="ei-confidence"></div>
+    </div>
+
+    <div id="ei-cards"></div>
+
+    <div id="ei-risk-indicators" style="margin-top:16px;">
+        <h4>Risk Indicators</h4>
+        <div id="ei-risk-bars"></div>
+    </div>
+
+    <div id="ei-summary" style="margin-top:16px; font-style:italic;"></div>
+</div>
+
+<script>
+    function eiSeverityColor(severity) {
+        if (severity === "Critical") return "#d9534f";
+        if (severity === "Warning") return "#f0ad4e";
+        return "#5cb85c";
+    }
+
+    function eiSeverityIcon(severity) {
+        if (severity === "Critical") return "\u2716"; // ✖
+        if (severity === "Warning") return "\u26A0";   // ⚠
+        return "\u2713"; // ✓
+    }
+
+    function eiLevelColor(level) {
+        if (level === "High") return "#d9534f";
+        if (level === "Medium") return "#f0ad4e";
+        return "#5cb85c";
+    }
+
+    function renderEngineeringInsights(insights) {
+        if (!insights) return;
+
+        var panel = document.getElementById("engineering-insights-panel");
+        panel.style.display = "block";
+
+        document.getElementById("ei-health-score").textContent =
+            insights.healthScore + " / 100";
+        document.getElementById("ei-health-score").style.color =
+            insights.healthScore >= 90 ? "#5cb85c" :
+            insights.healthScore >= 75 ? "#5bc0de" :
+            insights.healthScore >= 60 ? "#f0ad4e" : "#d9534f";
+
+        document.getElementById("ei-grade").textContent = insights.grade;
+
+        var pv = insights.physicsValidation;
+        var pvHtml = "";
+        pvHtml += "<div>" + (pv.massConservationPassed ? "\u2713" : "\u2716") + " Mass Conservation</div>";
+        pvHtml += "<div>" + (pv.boundaryConditionsPassed ? "\u2713" : "\u2716") + " Boundary Conditions</div>";
+        pvHtml += "<div>" + (pv.convergencePassed ? "\u2713" : "\u2716") + " Model Convergence</div>";
+        document.getElementById("ei-physics-items").innerHTML = pvHtml;
+        document.getElementById("ei-confidence").textContent =
+            "Simulation Confidence: " + pv.confidencePercent + "%";
+
+        var cardsHtml = "";
+        (insights.insights || []).forEach(function (item) {
+            var color = eiSeverityColor(item.severity);
+            var icon = eiSeverityIcon(item.severity);
+            cardsHtml += '<div style="border-left:4px solid ' + color + '; padding:10px 14px; margin-bottom:10px; background:#fafafa;">';
+            cardsHtml += '<div style="font-weight:bold; color:' + color + ';">' + icon + ' ' + item.category + '</div>';
+            cardsHtml += '<div><strong>What happened?</strong> ' + item.whatHappened + '</div>';
+            cardsHtml += '<div><strong>Why?</strong> ' + item.why + '</div>';
+            if (item.impact && item.impact.length) {
+                cardsHtml += '<div><strong>Impact:</strong><ul>';
+                item.impact.forEach(function (i) { cardsHtml += '<li>' + i + '</li>'; });
+                cardsHtml += '</ul></div>';
+            }
+            cardsHtml += '<div><strong>Recommendation:</strong> ' + item.recommendation + '</div>';
+            cardsHtml += '</div>';
+        });
+        document.getElementById("ei-cards").innerHTML = cardsHtml;
+
+        var riskHtml = "";
+        (insights.riskIndicators || []).forEach(function (r) {
+            var color = eiLevelColor(r.level);
+            riskHtml += '<div style="margin-bottom:8px;">';
+            riskHtml += '<div>' + r.name + ' — ' + r.percent + '% (' + r.level + ')</div>';
+            riskHtml += '<div style="background:#eee; height:10px; width:100%; max-width:300px;">';
+            riskHtml += '<div style="background:' + color + '; height:10px; width:' + r.percent + '%;"></div>';
+            riskHtml += '</div></div>';
+        });
+        document.getElementById("ei-risk-bars").innerHTML = riskHtml;
+
+        document.getElementById("ei-summary").textContent = insights.summary || "";
+    }
+</script>
