@@ -101,4 +101,5 @@ namespace CyclonApp.Model.DTOs
         public double? FinalLoss { get; set; }
     }
 
+
 }

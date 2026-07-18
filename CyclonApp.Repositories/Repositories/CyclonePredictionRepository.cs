@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using CyclonApp.Database;
 using CyclonApp.Model.DTOs;
 using CyclonApp.Repositories.Contracts;
@@ -12,83 +13,38 @@ namespace CyclonApp.Repositories.Repositories
     public class CyclonePredictionRepository : ICyclonePrediction
     {
         private readonly IHttpClientFactory _httpClientFactory;
-        private readonly ICyclonCalculation _calculationRepository;
         private readonly string _baseUrl;
 
-        // Trusted-range thresholds — matches the known limits of the Lapple
-        // correlation your existing calculation engine already relies on.
-        private const double MinTrustedParticleSizeMicron = 5.0;
-        private const double MaxPhysicsResidualPercent = 8.0;
+        // PostAsJsonAsync, when called with no explicit JsonSerializerOptions,
+        // defaults to JsonSerializerDefaults.Web — which camelCases property
+        // names ("BarrelDiameterMm" -> "barrelDiameterMm"). The Python service's
+        // Pydantic models declare PascalCase aliases (e.g. alias="BarrelDiameterMm")
+        // with populate_by_name=True, so they accept that exact alias OR the
+        // snake_case field name — but NOT camelCase. Sending camelCase made every
+        // field look "missing" (422). PropertyNamingPolicy = null keeps outgoing
+        // JSON keys exactly as the C# properties are written, matching the aliases.
+        private static readonly JsonSerializerOptions OutgoingJsonOptions = new()
+        {
+            PropertyNamingPolicy = null
+        };
 
         public CyclonePredictionRepository(
             IHttpClientFactory httpClientFactory,
-            ICyclonCalculation calculationRepository,
             IConfiguration configuration)
         {
             _httpClientFactory = httpClientFactory;
-            _calculationRepository = calculationRepository;
             _baseUrl = configuration["CyclonePredictionService:BaseUrl"]
                        ?? "http://localhost:8000";
         }
 
-        public async Task<CyclonePredictionDto> PredictAsync(DesignRevision input, CyclonTypeRatios ratios)
-        {
-            // ── 1. Call the external prediction service ─────────────────────────
-            var client = _httpClientFactory.CreateClient("CyclonePrediction");
-            client.BaseAddress = new Uri(_baseUrl);
-
-            var request = new PredictionRequest
-            {
-                FlowRateCFM = (double)input.FlowRateCFM,
-                InletLineSizeIn = (double)input.InletLineSizeIn,
-                OperatingTempC = (double)input.OperatingTempC,
-                OperatingPressKPa = (double)input.OperatingPressKPa,
-                GasType = input.GasType,
-                ParticleSizeMicron = (double)input.ParticleSizeMicron,
-                ParticleDensityKgm3 = (double)input.ParticleDensityKgm3,
-                EffectiveTurns = (double)input.EffectiveTurns,
-                InletHeightRatio = ratios.InletHeightRatio,
-                InletWidthRatio = ratios.InletWidthRatio,
-                OutletDiamRatio = ratios.OutletDiamRatio
-            };
-
-            var response = await client.PostAsJsonAsync("/predict", request);
-            response.EnsureSuccessStatusCode();
-
-            var result = await response.Content.ReadFromJsonAsync<PredictionResponse>()
-                         ?? throw new Exception("Prediction service returned an empty response.");
-
-            // ── 2. Cross-check against the existing Lapple calculation ──────────
-            //     This is the "physics rule" enforcement — the prediction is
-            //     never trusted purely on the external service's word.
-            var lappleResult = _calculationRepository.Calculate(input, ratios);
-
-            double efficiencyResidualPct = Math.Abs(result.PredictedEfficiency - lappleResult.Efficiency);
-
-            // ── 3. Decide trusted-range flag and build a human-readable note ────
-            bool withinParticleRange = (double)input.ParticleSizeMicron >= MinTrustedParticleSizeMicron;
-            bool withinResidualTolerance = efficiencyResidualPct <= MaxPhysicsResidualPercent;
-            bool isWithinTrustedRange = withinParticleRange && withinResidualTolerance;
-
-            string? notes = null;
-            if (!withinParticleRange)
-                notes = $"Particle size ({input.ParticleSizeMicron} micron) is below the " +
-                         $"{MinTrustedParticleSizeMicron}-micron range the underlying correlation was built on.";
-            else if (!withinResidualTolerance)
-                notes = $"Prediction differs from the standard calculation by {efficiencyResidualPct:F1}%, " +
-                         "beyond the normal tolerance — treat as indicative only.";
-
-            return new CyclonePredictionDto
-            {
-                Efficiency = Math.Round(result.PredictedEfficiency, 2),
-                PressureDropPa = Math.Round(result.PredictedPressureDropPa, 2),
-                PhysicsResidual = Math.Round(efficiencyResidualPct, 3),
-                IsWithinTrustedRange = isWithinTrustedRange,
-                Notes = notes
-            };
-        }
-
         // ── Async field-solving job — see ICyclonePrediction for contract notes ──
+        //
+        // NOTE: the old synchronous PredictAsync() (scalar CyclonePINN
+        // correction model, POST /predict) has been removed. The Python
+        // service retired that endpoint and everything it depended on —
+        // see app.py's module docstring — so this call site would only
+        // ever 422/404. Field-solving (/predict_field/*) below is the only
+        // prediction contract this service still serves.
 
         public async Task<string> StartFieldPredictionAsync(DesignRevision input, CyclonDimensions dimensions)
         {
@@ -116,7 +72,7 @@ namespace CyclonApp.Repositories.Repositories
                 GasType = string.IsNullOrWhiteSpace(input.GasType) ? "Air" : input.GasType
             };
 
-            var response = await client.PostAsJsonAsync("/predict_field/start", request);
+            var response = await client.PostAsJsonAsync("/predict_field/start", request, OutgoingJsonOptions);
 
             if (response.StatusCode == HttpStatusCode.TooManyRequests)
             {
@@ -210,27 +166,6 @@ namespace CyclonApp.Repositories.Repositories
         }
 
         // ── Wire-format classes for the external service call ───────────────────
-        private class PredictionRequest
-        {
-            public double FlowRateCFM { get; set; }
-            public double InletLineSizeIn { get; set; }
-            public double OperatingTempC { get; set; }
-            public double OperatingPressKPa { get; set; }
-            public string GasType { get; set; } = "Air";
-            public double ParticleSizeMicron { get; set; }
-            public double ParticleDensityKgm3 { get; set; }
-            public double EffectiveTurns { get; set; }
-            public double InletHeightRatio { get; set; }
-            public double InletWidthRatio { get; set; }
-            public double OutletDiamRatio { get; set; }
-        }
-
-        private class PredictionResponse
-        {
-            public double PredictedEfficiency { get; set; }
-            public double PredictedPressureDropPa { get; set; }
-        }
-
         private class PredictFieldStartRequest
         {
             public double BarrelDiameterMm { get; set; }

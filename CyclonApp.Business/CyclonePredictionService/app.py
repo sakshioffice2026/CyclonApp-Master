@@ -149,8 +149,8 @@ _field_jobs_running_count = 0  # guarded by _field_jobs_lock
 # between wait time and convergence quality — validated to run cleanly
 # end-to-end, NOT yet validated at exactly these epoch counts for full
 # convergence; tune based on real usage once this is live.
-FIELD_JOB_EPOCHS_ADAM = 3000
-FIELD_JOB_EPOCHS_LBFGS = 300
+FIELD_JOB_EPOCHS_ADAM = 5
+FIELD_JOB_EPOCHS_LBFGS = 2
 
 
 def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:

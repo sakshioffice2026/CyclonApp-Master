@@ -363,56 +363,16 @@ public class DesignController : Controller
         }
     }
 
-    // ── PREDICT (physics-guided) ─────────────────────────────────────────────
-
-    [HttpPost]
-    public async Task<IActionResult> PredictWithModel(int id)
-    {
-        try
-        {
-            var revision = await _designRepository.GetRevisionWithDetailsAsync(id);
-            if (revision == null) return NotFound();
-
-            var cycloneType = await _designRepository.GetCycloneTypeByIdAsync(
-                revision.CycloneDesign.CycloneTypeId);
-            if (cycloneType == null)
-            {
-                TempData["Error"] = "Cyclone type not found.";
-                return RedirectToAction("Results", new { id });
-            }
-
-            var ratios = _calculationRepository.ParseRatios(cycloneType.DimensionRatiosJson);
-            if (ratios == null)
-            {
-                TempData["Error"] = "Cyclone type configuration error. Contact admin.";
-                return RedirectToAction("Results", new { id });
-            }
-
-            var prediction = await _predictionRepository.PredictAsync(revision, ratios);
-            var predictionJson = JsonSerializer.Serialize(prediction, _jsonOpts);
-
-            await _designRepository.SavePredictionAsync(revision, predictionJson);
-
-            _logger.LogInformation(
-                "Prediction generated for Revision {RevId}. Eff={Eff:F1}%, Trusted={Trusted}.",
-                id, prediction.Efficiency, prediction.IsWithinTrustedRange);
-
-            TempData["Success"] = "Physics-guided prediction generated.";
-            return RedirectToAction("Results", new { id });
-        }
-        catch (Exception ex)
-        {
-            _uow.exceptionHandlerRepository.SaveException(
-                "DesignController",
-                "PredictWithModel",
-                ex.ToString());
-
-            TempData["Error"] = "The prediction service is unavailable. Please try again shortly.";
-            return RedirectToAction("Results", new { id });
-        }
-    }
-
     // ── DETAIL ────────────────────────────────────────────────────────────────
+    //
+    // NOTE: PredictWithModel (POST, called PredictAsync -> /predict) has been
+    // removed. The Python service retired the scalar CyclonePINN correction
+    // model that endpoint depended on — see app.py's module docstring — so
+    // this action would only ever surface "prediction service unavailable".
+    // Field-solving (StartFieldPrediction / FieldPredictionStatus below) is
+    // the only live prediction flow now. Previously-saved predictions
+    // (revision.PredictionJson) are still read and displayed in Results —
+    // see BuildResultsVm — since that's just showing historical data.
 
     [HttpGet]
     public async Task<IActionResult> Detail(int id)
@@ -628,7 +588,7 @@ public class DesignController : Controller
     // ── FIELD PREDICTION (physics-guided field solve, async job) ────────────
     // JSON endpoints, not redirects: a field solve takes real minutes, so the
     // client starts a job and polls status via AJAX rather than the
-    // request/redirect flow used by PredictWithModel above.
+    // request/redirect flow the old PredictWithModel action used.
 
     [HttpPost]
     [ValidateAntiForgeryToken]

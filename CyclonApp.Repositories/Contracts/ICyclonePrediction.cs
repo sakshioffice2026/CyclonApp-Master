@@ -5,8 +5,6 @@ namespace CyclonApp.Repositories.Contracts
 {
     public interface ICyclonePrediction
     {
-        Task<CyclonePredictionDto> PredictAsync(DesignRevision input, CyclonTypeRatios ratios);
-
         /// <summary>
         /// Starts an async field-solving job on the Python service
         /// (POST /predict_field/start) and returns the job id to poll.
