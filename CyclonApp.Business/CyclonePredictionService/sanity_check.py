@@ -55,9 +55,11 @@ def load_grid(path: str) -> dict:
 	if "grid" in data:
 		grid = data["grid"]
 		grid["_v_inlet_ms"] = data.get("v_inlet_ms")
+		grid["_q_design_m3s"] = data.get("q_design_m3s")
 	else:
 		grid = data
 		grid["_v_inlet_ms"] = None
+		grid["_q_design_m3s"] = None
 	return grid
 
 
@@ -207,14 +209,21 @@ def check_wall_and_axis(grid: dict, v_inlet: float) -> bool:
 	return ok
 
 
-def check_mass_conservation(grid: dict) -> bool:
+def check_mass_conservation(grid: dict, q_design: float | None = None) -> bool:
 	"""Computes Q(z) = integral of v_z * 2*pi*r dr at each z cross-section
 	(trapezoidal rule over the sorted r values present at that z) and
 	checks Q(z) stays reasonably consistent across sections. This is
 	stronger evidence of a physically valid solution than the training
 	loss alone — it checks continuity is satisfied in aggregate, not just
 	that the pointwise PDE residual was small at the collocation points
-	used during training."""
+	used during training.
+
+	q_design: optional design volumetric flow (m^3/s). When provided (or
+	recoverable from the JSON), relative spread is measured against this
+	stable scale rather than mean(Q). That matters for reverse-flow
+	cyclones, where the physically correct mid-plane net Q is ~0 — dividing
+	by mean(Q) then false-fails even a good solution.
+	"""
 	import math
 	groups = _group_by_z(grid)
 	z_values = sorted(groups.keys())
@@ -255,15 +264,30 @@ def check_mass_conservation(grid: dict) -> bool:
 	q_values = [q for _, q in mid]
 	q_mean = sum(q_values) / len(q_values)
 	q_spread = max(q_values) - min(q_values)
-	rel_spread = q_spread / abs(q_mean) if q_mean else float("inf")
+
+	# Characteristic scale for the relative-spread check:
+	# - When |mean Q| is appreciable, use |mean| (original check) so a
+	#   mid-section that drains from ~0.03→0.01 still FAILs hard.
+	# - When |mean Q|≈0 (correct reverse-flow answer), fall back to a
+	#   fraction of design flow so we do not divide by ~0 and false-fail.
+	# Do NOT fold in peak |Q| from the inlet plane — that dwarfs the
+	# mid-section signal and hides real drain failures.
+	if q_design is None:
+		q_design = grid.get("_q_design_m3s")
+	design_abs = abs(float(q_design)) if q_design is not None else 0.0
+	q_floor = max(0.05 * design_abs, 1e-6)
+	q_char = max(abs(q_mean), q_floor)
+	rel_spread = q_spread / q_char
+	level_frac = abs(q_mean) / max(design_abs, q_floor)
 
 	if rel_spread > 0.5:
 		report(
 			"Mass conservation",
 			"FAIL",
-			f"volumetric flow Q(z) varies by {rel_spread:.1%} across the "
-			f"barrel mid-section (mean {q_mean:.4f} m^3/s) — continuity "
-			f"not well satisfied in aggregate",
+			f"volumetric flow Q(z) varies by {rel_spread:.1%} of "
+			f"characteristic scale {q_char:.4f} m^3/s across the barrel "
+			f"mid-section (mean {q_mean:.4f} m^3/s) — continuity not well "
+			f"satisfied in aggregate",
 		)
 		return False
 
@@ -271,19 +295,27 @@ def check_mass_conservation(grid: dict) -> bool:
 		report(
 			"Mass conservation",
 			"WARN",
-			f"Q(z) varies by {rel_spread:.1%} across the barrel "
-			f"mid-section (mean {q_mean:.4f} m^3/s) — some inconsistency, "
-			f"may improve with more training",
+			f"Q(z) varies by {rel_spread:.1%} of characteristic scale "
+			f"{q_char:.4f} m^3/s across the barrel mid-section "
+			f"(mean {q_mean:.4f} m^3/s) — some inconsistency, may improve "
+			f"with more training",
 		)
 		return True
 
 	else:
+		extra = ""
+		if level_frac > 0.5:
+			extra = (
+				f" Note: |mean Q| is {level_frac:.0%} of scale — large "
+				f"net through-flow; reverse-flow exhaust may be weak."
+			)
 		report(
 			"Mass conservation",
 			"PASS",
-			f"Q(z) varies by only {rel_spread:.1%} across the barrel "
-			f"mid-section (mean {q_mean:.4f} m^3/s) — continuity well "
-			f"satisfied in aggregate",
+			f"Q(z) varies by only {rel_spread:.1%} of characteristic scale "
+			f"{q_char:.4f} m^3/s across the barrel mid-section "
+			f"(mean {q_mean:.4f} m^3/s) — continuity well satisfied in "
+			f"aggregate.{extra}",
 		)
 		return True
 def main():
@@ -308,7 +340,7 @@ def main():
 		check_nan_inf(grid),
 		check_velocity_magnitude(grid, v_inlet),
 		check_wall_and_axis(grid, v_inlet),
-		check_mass_conservation(grid),
+		check_mass_conservation(grid, q_design=grid.get("_q_design_m3s")),
 	]
 
 	print()

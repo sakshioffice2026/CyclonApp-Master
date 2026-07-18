@@ -54,6 +54,7 @@ were already built for is actually exercised during training.
 """
 from __future__ import annotations
 
+import math
 import time
 from typing import Callable, Optional
 
@@ -99,12 +100,21 @@ BC_LOSS_WEIGHT = 10.0
 # the network satisfy wall/axis/inlet/outlet BCs almost exactly while still
 # badly violating continuity in aggregate through the interior — exactly
 # the "passes wall/axis checks, fails Q(z) constancy" failure mode seen in
-# sanity_check.check_mass_conservation. This term computes Q(z) at several
-# cross-sections directly and penalizes it for deviating from its own mean,
-# giving continuity a much stronger, harder-to-ignore gradient signal.
-# Not yet empirically tuned relative to BC_LOSS_WEIGHT — start here, and
-# increase if Q(z) rel_spread is still high after training with this term.
-MASS_FLOW_LOSS_WEIGHT = 5.0
+# sanity_check.check_mass_conservation.
+#
+# ROOT-CAUSE FIX (repeated Q(z) failures after the first mass-flow term):
+# the original loss divided by mean(Q). For a reverse-flow cyclone the
+# physically correct net mid-plane flow is ~0 (gas leaves via the top
+# exhaust, not the bottom), so mean(Q)→0 makes the relative loss explode
+# and actively fight the correct solution — training either destabilizes
+# or settles on a spurious finite, z-varying Q. Scale by the known design
+# volumetric flow instead, pin interior net Q→0, and match exhaust
+# outflow to Q_design so mass has a real exit path.
+MASS_FLOW_LOSS_WEIGHT = 25.0
+# Extra multiplier on the continuity PDE residual alone (momentum/turb
+# still use PDE_LOSS_WEIGHT / TURB_LOSS_WEIGHT). Continuity is one term
+# against many BC terms; without this it is chronically under-weighted.
+CONTINUITY_LOSS_WEIGHT = 5.0
 
 OnProgressFn = Callable[[int, int, float], None]
 
@@ -247,15 +257,13 @@ def _pde_and_turb_loss(model_fn, geometry: CycloneAxisymGeometry, rho: torch.Ten
     r, z = _sample_interior_away_from_axis(geometry, n_interior, device)
     res = rans_field_residuals(model_fn, r, z, rho, nu)
     scales = _pde_residual_scales(scaler)
+    continuity = ((res["continuity"] / scales["continuity"]) ** 2).mean()
     pde = (
-        (res["continuity"] / scales["continuity"]) ** 2
-    ).mean() + (
-        (res["r_momentum"] / scales["r_momentum"]) ** 2
-    ).mean() + (
-        (res["theta_momentum"] / scales["theta_momentum"]) ** 2
-    ).mean() + (
-        (res["z_momentum"] / scales["z_momentum"]) ** 2
-    ).mean()
+        CONTINUITY_LOSS_WEIGHT * continuity
+        + ((res["r_momentum"] / scales["r_momentum"]) ** 2).mean()
+        + ((res["theta_momentum"] / scales["theta_momentum"]) ** 2).mean()
+        + ((res["z_momentum"] / scales["z_momentum"]) ** 2).mean()
+    )
     turb = (
         (res["k_equation"] / scales["k_equation"]) ** 2
     ).mean() + (
@@ -278,37 +286,51 @@ def _bc_loss(model_fn, geometry: CycloneAxisymGeometry, v_inlet: torch.Tensor,
     return total
 
 
+def _axial_volume_flow(
+    model_fn,
+    r_max: float,
+    z: float,
+    n_r: int,
+    device: str,
+) -> torch.Tensor:
+    """Q = 2*pi*integral_0^{r_max} v_z(r,z) * r dr at one axial plane."""
+    r = torch.linspace(0.0, float(r_max), n_r, device=device)
+    zz = torch.full((n_r,), float(z), device=device)
+    vz = model_fn(r, zz)["v_z"]
+    return 2.0 * torch.pi * torch.trapz(vz * r, r)
+
+
 def _mass_flow_loss(
     model,
     scaler,
     geometry: CycloneAxisymGeometry,
+    q_design: float,
     device: str,
     n_planes: int = 8,
     n_r: int = 64,
 ) -> torch.Tensor:
     """
-    Direct aggregate mass-conservation regularizer: computes the
-    volumetric flow Q(z) = 2*pi*integral(v_z * r dr) at several z
-    cross-sections spanning the barrel and cone (avoiding the inlet/outlet
-    end regions, where Q(z) is legitimately expected to change), and
-    penalizes each Q(z) for deviating from the batch's own mean. For a
-    divergence-free field with impermeable side walls, Q(z) must be
-    constant between the inlet and outlet boundaries — this term targets
-    that aggregate property directly, as a stronger complement to the
-    pointwise continuity PDE residual in _pde_and_turb_loss (see
-    MASS_FLOW_LOSS_WEIGHT's docstring above for why the pointwise
-    residual alone was insufficient — same quantity sanity_check.
-    check_mass_conservation independently measures on the trained grid).
+    Aggregate mass-conservation regularizer (complements pointwise
+    continuity in _pde_and_turb_loss; same Q(z) sanity_check measures).
 
-    Each z-plane integrates only out to that plane's TRUE local wall
-    radius (geometry.outer_wall_radius(z), which tapers linearly through
-    the cone), not a fixed r_barrel — integrating past the true wall would
-    evaluate the network outside the fluid domain (inside the solid cone
-    wall) and corrupt the Q(z) estimate with meaningless extrapolated
-    velocity, actively fighting the very constraint this term is meant to
-    enforce.
+    For impermeable side walls, integrated continuity requires Q(z) constant
+    on interior planes, and for a gas cyclone that constant equals the
+    bottom-outlet throughput (~0) because nearly all mass leaves through
+    the top exhaust. Separately, exhaust outflow must match the design
+    inlet rate so mass has a real exit path (pointwise outlet BCs alone
+    only enforce zero-gradient / p=0 — they do not fix the flux).
+
+    Critical scaling: residuals are divided by q_design (known, stable),
+    NEVER by mean(Q). Dividing by mean(Q) blows up as reverse flow drives
+    net Q→0 — the physically correct answer — and was the root cause of
+    repeated mass-conservation training failures.
+
+    Each interior plane integrates only out to geometry.outer_wall_radius(z)
+    (cone taper), not a fixed r_barrel — integrating past the wall would
+    sample outside the fluid domain and corrupt Q(z).
     """
     model_fn = model.as_model_fn(scaler)
+    q_scale = max(abs(float(q_design)), 1e-6)
 
     z_planes = torch.linspace(
         0.15 * geometry.total_height,
@@ -319,26 +341,38 @@ def _mass_flow_loss(
 
     q_values = []
     for z in z_planes:
-        r_max = geometry.outer_wall_radius(z.unsqueeze(0)).squeeze(0)
-        r = torch.linspace(0.0, float(r_max), n_r, device=device, requires_grad=True)
-        zz = torch.full_like(r, float(z))
-
-        pred = model_fn(r, zz)
-        vz = pred["v_z"]
-        q = 2.0 * torch.pi * torch.trapz(vz * r, r)
-        q_values.append(q)
-
+        r_max = float(geometry.outer_wall_radius(z.unsqueeze(0)).squeeze(0))
+        q_values.append(_axial_volume_flow(model_fn, r_max, float(z), n_r, device))
     q_values = torch.stack(q_values)
-    target_q = q_values.mean().detach()
-    return ((q_values - target_q) / (target_q + 1e-9)).pow(2).mean()
+    q_mean = q_values.mean()
+
+    # Constancy across interior planes, relative to design flow scale.
+    constancy = ((q_values - q_mean.detach()) / q_scale).pow(2).mean()
+    # Net mid-plane through-flow ≈ 0 (gas exits via top exhaust).
+    level = (q_mean / q_scale).pow(2)
+
+    # Exhaust outflow at z=0, r in [0, r_exhaust]. Domain outward normal at
+    # the top is -z, so outward volume flux = -integral(v_z * 2*pi*r dr).
+    q_out_exhaust = -_axial_volume_flow(
+        model_fn, geometry.r_exhaust, 0.0, n_r, device,
+    )
+    exhaust_match = ((q_out_exhaust - q_scale) / q_scale).pow(2)
+
+    # Bottom dust outlet should carry ~0 gas volume flow.
+    q_out_bottom = _axial_volume_flow(
+        model_fn, geometry.r_bottom_outlet, geometry.total_height, n_r, device,
+    )
+    bottom_match = (q_out_bottom / q_scale).pow(2)
+
+    return constancy + level + exhaust_match + bottom_match
 
 
 def _total_loss(model, scaler, geometry, rho, nu, v_inlet, v_z_inlet, k_inlet, eps_inlet,
-                 n_interior: int, device: str) -> torch.Tensor:
+                 q_design: float, n_interior: int, device: str) -> torch.Tensor:
     model_fn = model.as_model_fn(scaler)
     pde_turb = _pde_and_turb_loss(model_fn, geometry, rho, nu, scaler, n_interior, device)
     bc = _bc_loss(model_fn, geometry, v_inlet, v_z_inlet, k_inlet, eps_inlet, scaler, device)
-    mass = _mass_flow_loss(model, scaler, geometry, device)
+    mass = _mass_flow_loss(model, scaler, geometry, q_design, device)
     return pde_turb + BC_LOSS_WEIGHT * bc + MASS_FLOW_LOSS_WEIGHT * mass
 
 
@@ -410,6 +444,11 @@ def train_field_model(
     v_z_inlet_t = torch.as_tensor(float(v_z_inlet), device=device)
     k_inlet_t = torch.as_tensor(float(k_inlet), device=device)
     eps_inlet_t = torch.as_tensor(float(eps_inlet), device=device)
+    # Design volumetric flow implied by the inlet-ring axial BC — stable
+    # scale for _mass_flow_loss (must NOT use mean(Q), see docstring).
+    q_design = float(v_z_inlet) * math.pi * (
+        geometry.r_barrel ** 2 - geometry.r_exhaust ** 2
+    )
 
     length_scale = geometry.r_barrel
     velocity_scale = max(float(v_inlet), 1e-6)
@@ -432,7 +471,7 @@ def train_field_model(
     for epoch in range(1, epochs_adam + 1):
         optimizer.zero_grad(set_to_none=True)
         loss = _total_loss(model, scaler, geometry, rho_t, nu_t, v_inlet_t, v_z_inlet_t,
-                            k_inlet_t, eps_inlet_t, n_interior, device)
+                            k_inlet_t, eps_inlet_t, q_design, n_interior, device)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
         optimizer.step()
@@ -464,9 +503,10 @@ def train_field_model(
         model_fn = model.as_model_fn(scaler)
         res = rans_field_residuals(model_fn, r_fixed, z_fixed, rho_t, nu_t)
         scales = _pde_residual_scales(scaler)
+        continuity = ((res["continuity"] / scales["continuity"]) ** 2).mean()
         pde_turb_loss = (
             PDE_LOSS_WEIGHT * (
-                ((res["continuity"] / scales["continuity"]) ** 2).mean()
+                CONTINUITY_LOSS_WEIGHT * continuity
                 + ((res["r_momentum"] / scales["r_momentum"]) ** 2).mean()
                 + ((res["theta_momentum"] / scales["theta_momentum"]) ** 2).mean()
                 + ((res["z_momentum"] / scales["z_momentum"]) ** 2).mean()
@@ -477,7 +517,7 @@ def train_field_model(
             )
         )
         bc = _bc_loss(model_fn, geometry, v_inlet_t, v_z_inlet_t, k_inlet_t, eps_inlet_t, scaler, device)
-        mass = _mass_flow_loss(model, scaler, geometry, device)
+        mass = _mass_flow_loss(model, scaler, geometry, q_design, device)
         loss = pde_turb_loss + BC_LOSS_WEIGHT * bc + MASS_FLOW_LOSS_WEIGHT * mass
         loss.backward()
         closure_history["losses"].append(float(loss.item()))
@@ -633,6 +673,9 @@ def run_field_prediction_job(
         "nu": nu,
         "v_inlet": v_inlet,
         "v_z_inlet": v_z_inlet,
+        "q_design": float(v_z_inlet) * math.pi * (
+            geometry.r_barrel ** 2 - geometry.r_exhaust ** 2
+        ),
         "k_inlet": k_inlet,
         "eps_inlet": eps_inlet,
         "model": model,
@@ -756,6 +799,8 @@ def main(argv: Optional[list] = None) -> None:
             "rho_kgm3": result["rho"],
             "nu_m2s": result["nu"],
             "v_inlet_ms": result["v_inlet"],
+            "v_z_inlet_ms": result["v_z_inlet"],
+            "q_design_m3s": result["q_design"],
             "k_inlet": result["k_inlet"],
             "eps_inlet": result["eps_inlet"],
             "final_loss": history["final_loss"],
