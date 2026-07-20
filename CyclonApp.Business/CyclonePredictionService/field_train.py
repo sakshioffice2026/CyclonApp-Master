@@ -8,15 +8,24 @@ of truth for training the field-solving model — both the CLI entry point
 `train_field_model` functions. Do not duplicate this loop, or the
 geometry/fluid-property glue in `run_field_prediction_job`, anywhere else.
 
-Why train-on-demand: CycloneFieldPINN takes only (r, z) as input, with
-geometry and operating condition baked in as fixed constants at training
-time (see field_model.CycloneFieldPINN / FieldScaler). Unlike CyclonePINN,
-there is no single pre-trained checkpoint that answers field queries for
-an arbitrary design — each request trains a small, purpose-built network
-for that one geometry/operating point. This is the chosen tradeoff versus
-a generalized parametric network (which would take geometry/operating
-params as additional inputs, train once, infer instantly, but is
-significantly harder to get to converge well and was not chosen here).
+Two training modes live in this file:
+
+  * train_field_model / run_field_prediction_job — trains one small
+    network per request, for exactly one fixed geometry/flow rate. Simple,
+    reliable, and still what app.py's /predict_field job uses. Geometry
+    and operating condition are baked in as fixed constants at training
+    time for this mode.
+
+  * train_parametric_field_model — trains ONE network across a whole
+    family of LAPPLE cyclone sizes/flow rates at once, using domain
+    randomization (a different sampled geometry/flow rate every epoch).
+    CycloneFieldPINN's inputs are (r, z, diameter_m, flow_rate_cfm) — see
+    field_model.py's module docstring — specifically so this mode is
+    possible: train once, then query any diameter/flow rate inside the
+    trained range instantly, no per-request training. This is harder to
+    get to converge well than the single-geometry mode (see that
+    function's docstring), which is why both modes are kept rather than
+    deleting the simpler one.
 
 Training recipe, in order:
   1. Adam phase — bulk convergence. Uses an exponentially decaying LR
@@ -358,6 +367,8 @@ def _mass_flow_loss(
     geometry: CycloneAxisymGeometry,
     q_design: float,
     device: str,
+    diameter_m: torch.Tensor,
+    flow_rate_cfm: torch.Tensor,
     n_planes: int = 8,
     n_r: int = 64,
 ) -> torch.Tensor:
@@ -381,7 +392,7 @@ def _mass_flow_loss(
     (cone taper), not a fixed r_barrel — integrating past the wall would
     sample outside the fluid domain and corrupt Q(z).
     """
-    model_fn = model.as_model_fn(scaler)
+    model_fn = model.as_model_fn(scaler, diameter_m, flow_rate_cfm)
     q_scale = max(abs(float(q_design)), 1e-6)
 
     z_planes = torch.linspace(
@@ -420,11 +431,12 @@ def _mass_flow_loss(
 
 
 def _total_loss(model, scaler, geometry, rho, nu, v_inlet, v_z_inlet, k_inlet, eps_inlet,
-                 q_design: float, n_interior: int, device: str) -> torch.Tensor:
-    model_fn = model.as_model_fn(scaler)
+                 q_design: float, n_interior: int, device: str,
+                 diameter_m: torch.Tensor, flow_rate_cfm: torch.Tensor) -> torch.Tensor:
+    model_fn = model.as_model_fn(scaler, diameter_m, flow_rate_cfm)
     pde_turb = _pde_and_turb_loss(model_fn, geometry, rho, nu, scaler, n_interior, device)
     bc = _bc_loss(model_fn, geometry, v_inlet, v_z_inlet, k_inlet, eps_inlet, scaler, device)
-    mass = _mass_flow_loss(model, scaler, geometry, q_design, device)
+    mass = _mass_flow_loss(model, scaler, geometry, q_design, device, diameter_m, flow_rate_cfm)
     return pde_turb + BC_LOSS_WEIGHT * bc + MASS_FLOW_LOSS_WEIGHT * mass
 
 
@@ -436,6 +448,7 @@ def train_field_model(
     v_z_inlet: float,
     k_inlet: float,
     eps_inlet: float,
+    flow_rate_cfm: float,
     epochs_adam: int = 3000,
     epochs_lbfgs: int = 300,
     n_interior: int = 2048,
@@ -465,6 +478,12 @@ def train_field_model(
             root-cause note in field_physics.py / field_boundary_conditions.py.
         k_inlet, eps_inlet: inlet turbulence kinetic energy (m2/s2) and
             dissipation rate (m2/s3), see field_turbulence.inlet_turbulence_quantities
+        flow_rate_cfm: design flow rate in CFM. Used two ways: (a) to derive
+            q_design for _mass_flow_loss (via v_z_inlet, as before), and
+            (b) as CycloneFieldPINN's explicit "flow_rate_cfm" conditioning
+            input alongside diameter_m (= 2*geometry.r_barrel) — see
+            field_model.py's module docstring for why the network needs
+            these as separate inputs rather than only via normalization.
         epochs_adam: Adam phase epoch count
         epochs_lbfgs: L-BFGS fine-tune phase step count
         n_interior: PDE collocation points sampled fresh every epoch
@@ -501,6 +520,11 @@ def train_field_model(
     q_design = float(v_z_inlet) * math.pi * (
         geometry.r_barrel ** 2 - geometry.r_exhaust ** 2
     )
+    # Explicit conditioning inputs the network needs on every forward pass
+    # (see CycloneFieldPINN.forward / as_model_fn) — fixed for this whole
+    # training call since this function trains one geometry/flow rate.
+    diameter_m_t = torch.as_tensor(2.0 * geometry.r_barrel, device=device)
+    flow_rate_cfm_t = torch.as_tensor(float(flow_rate_cfm), device=device)
 
     length_scale = geometry.r_barrel
     velocity_scale = max(float(v_inlet), 1e-6)
@@ -523,7 +547,8 @@ def train_field_model(
     for epoch in range(1, epochs_adam + 1):
         optimizer.zero_grad(set_to_none=True)
         loss = _total_loss(model, scaler, geometry, rho_t, nu_t, v_inlet_t, v_z_inlet_t,
-                            k_inlet_t, eps_inlet_t, q_design, n_interior, device)
+                            k_inlet_t, eps_inlet_t, q_design, n_interior, device,
+                            diameter_m_t, flow_rate_cfm_t)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
         optimizer.step()
@@ -552,7 +577,7 @@ def train_field_model(
 
     def closure():
         optimizer_lbfgs.zero_grad(set_to_none=True)
-        model_fn = model.as_model_fn(scaler)
+        model_fn = model.as_model_fn(scaler, diameter_m_t, flow_rate_cfm_t)
         res = rans_field_residuals(model_fn, r_fixed, z_fixed, rho_t, nu_t)
         scales = _pde_residual_scales(scaler)
         continuity = ((res["continuity"] / scales["continuity"]) ** 2).mean()
@@ -569,7 +594,7 @@ def train_field_model(
             )
         )
         bc = _bc_loss(model_fn, geometry, v_inlet_t, v_z_inlet_t, k_inlet_t, eps_inlet_t, scaler, device)
-        mass = _mass_flow_loss(model, scaler, geometry, q_design, device)
+        mass = _mass_flow_loss(model, scaler, geometry, q_design, device, diameter_m_t, flow_rate_cfm_t)
         loss = pde_turb_loss + BC_LOSS_WEIGHT * bc + MASS_FLOW_LOSS_WEIGHT * mass
         loss.backward()
         closure_history["losses"].append(float(loss.item()))
@@ -715,13 +740,18 @@ def run_field_prediction_job(
 
     model, scaler, history = train_field_model(
         geometry, rho, nu, v_inlet, v_z_inlet, k_inlet, eps_inlet,
+        flow_rate_cfm=flow_rate_cfm,
         epochs_adam=epochs_adam,
         epochs_lbfgs=epochs_lbfgs,
         on_progress=on_progress,
         **train_kwargs,
     )
 
-    grid = evaluate_grid(model, scaler, geometry)
+    grid = evaluate_grid(
+        model, scaler, geometry,
+        diameter_m=2.0 * geometry.r_barrel,
+        flow_rate_cfm=flow_rate_cfm,
+    )
 
     q_design = float(v_z_inlet) * math.pi * (
         geometry.r_barrel ** 2 - geometry.r_exhaust ** 2
@@ -771,6 +801,348 @@ def run_field_prediction_job(
         "history": history,
         "grid": grid,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# PARAMETRIC (DOMAIN-RANDOMIZATION) TRAINING
+#
+# Everything above (train_field_model / run_field_prediction_job) trains a
+# fresh network for ONE fixed geometry + flow rate — that is still a fully
+# supported, valid way to use this file (e.g. a quick single-design check).
+#
+# What follows is the OTHER mode: train ONE CycloneFieldPINN that covers an
+# entire family of LAPPLE-type cyclones (any diameter/flow rate inside the
+# sampled ranges), by picking a different geometry/flow rate every epoch
+# instead of holding both fixed for the whole run. This is what
+# CycloneFieldPINN's 4-input signature (r, z, diameter_m, flow_rate_cfm)
+# was built for — see field_model.py's module docstring.
+#
+# Only Adam is used here, never L-BFGS. L-BFGS estimates curvature from how
+# the gradient changes between consecutive steps; that estimate is only
+# valid if the objective is the same function from one step to the next.
+# Domain randomization changes the geometry AND the flow rate every epoch,
+# so the "objective" is a different function every step — L-BFGS's
+# curvature estimate would be measuring noise, not the loss landscape (this
+# is exactly why train_field_model's own L-BFGS phase above is only safe
+# because it samples a fixed batch from a SINGLE geometry).
+# ─────────────────────────────────────────────────────────────────────────
+
+# Standard high-efficiency Lapple cyclone proportions (dimension / barrel
+# diameter), used ONLY as a fallback default so this module has something
+# runnable out of the box. These mirror the field names of the .NET
+# CyclonTypeRatios DTO (CyclonApp.Model/DTOs/CyclonTypeRatios.cs) —
+# ExhaustLengthRatio doesn't have one universally agreed literature figure,
+# so this uses ExhaustDiaRatio's typical companion length.
+#
+# IMPORTANT: this app already stores per-cyclone-type ratios in the
+# CycloneType DB table (that's what CyclonTypeRatios models). Before running
+# a real training job, pull the actual "Lapple" row's ratios from that table
+# and pass them as the `ratios` argument below instead of relying on this
+# default — that guarantees the PINN is trained on the exact same geometry
+# family the rest of the app (and any Lapple/Shepherd-Lapple analytic
+# calculations it's compared against) uses. Treat the values below as a
+# textbook placeholder, not a source of truth for your data.
+LAPPLE_RATIOS: dict[str, float] = {
+    "InletHeightRatio": 0.50,
+    "InletWidthRatio": 0.25,
+    "BarrelHeightRatio": 1.50,
+    "ConeHeightRatio": 2.50,
+    "OutletDiamRatio": 0.50,   # exhaust (vortex finder) diameter
+    "BottomOutletRatio": 0.25,
+    "ExhaustLengthRatio": 0.625,
+}
+
+
+def geometry_mm_from_diameter(
+    barrel_diameter_mm: float, ratios: dict[str, float],
+) -> dict[str, float]:
+    """Scales every other LAPPLE dimension off one sampled barrel diameter,
+    using fixed dimension/diameter ratios. Returns a dict with exactly the
+    keyword names geometry_from_dimensions_mm (and run_field_prediction_job)
+    expect, so it can be splatted straight into either.
+
+    This is what lets domain randomization sample a single scalar (the
+    diameter) per epoch and still get a complete, geometrically-consistent
+    cyclone — rather than having to independently sample 6+ correlated
+    dimensions, most combinations of which wouldn't be a valid/manufacturable
+    cyclone at all.
+    """
+    d = float(barrel_diameter_mm)
+    return {
+        "barrel_diameter_mm": d,
+        "barrel_height_mm": d * ratios["BarrelHeightRatio"],
+        "cone_height_mm": d * ratios["ConeHeightRatio"],
+        "exhaust_dia_mm": d * ratios["OutletDiamRatio"],
+        "exhaust_length_mm": d * ratios["ExhaustLengthRatio"],
+        "bottom_outlet_mm": d * ratios["BottomOutletRatio"],
+        "inlet_height_mm": d * ratios["InletHeightRatio"],
+        "inlet_width_mm": d * ratios["InletWidthRatio"],
+    }
+
+
+def _sample_diameter_and_flow(
+    diameter_range_m: tuple[float, float],
+    flow_rate_range_cfm: tuple[float, float],
+    device: str,
+) -> tuple[float, float]:
+    """One (diameter_m, flow_rate_cfm) draw, uniform over each range
+    independently. Plain Python floats (not tensors) on purpose — this
+    value drives geometry construction (geometry_mm_from_diameter,
+    geometry_from_dimensions_mm), which is plain Python/CycloneAxisymGeometry
+    code, not an autograd graph; it only becomes a tensor once it's fed to
+    the network as a conditioning input."""
+    d = diameter_range_m[0] + torch.rand(1, device=device).item() * (
+        diameter_range_m[1] - diameter_range_m[0]
+    )
+    q = flow_rate_range_cfm[0] + torch.rand(1, device=device).item() * (
+        flow_rate_range_cfm[1] - flow_rate_range_cfm[0]
+    )
+    return d, q
+
+
+def train_parametric_field_model(
+    rho_fn,
+    ratios: dict[str, float] = LAPPLE_RATIOS,
+    diameter_range_m: tuple[float, float] = (0.150, 0.750),
+    flow_rate_range_cfm: tuple[float, float] = (300.0, 13000.0),
+    operating_temp_c: float = 25.0,
+    operating_press_kpa: float = 101.325,
+    gas_type: str = "Air",
+    epochs: int = 20000,
+    n_interior: int = 1024,
+    hidden: int = 64,
+    n_layers: int = 6,
+    lr_start: float = 3e-3,
+    lr_end: float = 1e-4,
+    grad_clip_norm: float = 1.0,
+    device: str = "cpu",
+    seed: Optional[int] = 0,
+    on_progress: Optional[OnProgressFn] = None,
+    progress_every: int = 100,
+) -> tuple[CycloneFieldPINN, FieldScaler, dict]:
+    """
+    Trains ONE CycloneFieldPINN across a whole family of LAPPLE cyclones
+    instead of a single fixed geometry — see the module-level comment above
+    this function for why (domain randomization + why L-BFGS is dropped).
+
+    Every epoch:
+      1. sample a diameter and flow rate,
+      2. scale the rest of the LAPPLE dimensions off that diameter (`ratios`),
+      3. build that epoch's geometry + fluid/inlet/turbulence quantities,
+      4. draw fresh collocation/boundary points for THAT geometry,
+      5. build model_fn = model.as_model_fn(scaler, diameter_m, flow_rate_cfm)
+         so every physics/BC/mass-flow term is evaluated against the
+         network's prediction FOR that sampled design (not some other
+         geometry's field) — this is item 1/2/3 of the "remaining work":
+         every as_model_fn() call and every _mass_flow_loss() call must
+         receive the CURRENT epoch's sampled diameter_m/flow_rate_cfm, not
+         a stale or default one.
+      6. one Adam step.
+
+    Args:
+        rho_fn: callable(temp_c, press_kpa, gas_onehot) -> (rho, nu) tensors
+            — pass field_physics.fluid_properties. Kept as a parameter
+            (rather than importing directly) only to make this function
+            trivially testable with a fake fluid model; production callers
+            should pass field_physics.fluid_properties.
+        ratios: LAPPLE dimension ratios (see geometry_mm_from_diameter) —
+            pull these from the CycloneType DB table for "Lapple" rather
+            than trusting the LAPPLE_RATIOS placeholder above.
+        diameter_range_m / flow_rate_range_cfm: the family of designs this
+            one network will learn to cover. Must be inside a physically
+            sane LAPPLE size range for `ratios`, and should match (or be a
+            subset of) the range you'll actually query at inference time —
+            the network was never shown geometries outside this window and
+            has no guarantee of extrapolating correctly beyond it.
+        epochs: total Adam steps. Needs to be much larger than
+            train_field_model's epochs_adam, since each step only sees one
+            (of infinitely many) sampled geometries — this is genuinely a
+            harder learning problem than fitting one fixed field.
+        n_interior: PDE collocation points sampled fresh every epoch for
+            that epoch's geometry.
+        hidden, n_layers: CycloneFieldPINN architecture.
+        lr_start / lr_end: exponential LR decay bounds over `epochs`.
+        grad_clip_norm: max gradient norm per step.
+        device: "cpu" or "cuda".
+        seed: RNG seed for reproducible sampling + init; None to skip.
+        on_progress / progress_every: as in train_field_model.
+
+    Returns:
+        (model, scaler, history). `scaler` is a "template" FieldScaler —
+        its D_min/D_max/Q_min/Q_max are the fixed normalization window used
+        for every epoch (correct to reuse at inference time via
+        evaluate_grid), but its L/U/P/K/E are only from the LAST sampled
+        epoch — at inference time, use FieldScaler.with_scales(...) (or
+        just field_model.evaluate_grid, which only needs diameter_m/
+        flow_rate_cfm, not L/U directly) for the specific design you're
+        querying, not this returned scaler's raw L/U.
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    # Fixed for the whole run — this is what makes D_norm/Q_norm mean the
+    # same thing on epoch 1 and epoch 20000 (see FieldScaler.with_scales).
+    template_scaler = FieldScaler(
+        length_scale_m=1.0, velocity_scale_ms=1.0, rho=1.0,
+        diameter_range_m=diameter_range_m,
+        flow_rate_range_cfm=flow_rate_range_cfm,
+    )
+
+    model = CycloneFieldPINN(hidden=hidden, n_layers=n_layers).to(device)
+    model.train()
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr_start)
+    decay_gamma = (lr_end / lr_start) ** (1.0 / max(epochs, 1))
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=decay_gamma)
+
+    start_time = time.time()
+    loss_history: list[float] = []
+    scaler = template_scaler  # last-used scaler, returned for reference
+
+    for epoch in range(1, epochs + 1):
+        diameter_m, flow_rate_cfm = _sample_diameter_and_flow(
+            diameter_range_m, flow_rate_range_cfm, device,
+        )
+        dims_mm = geometry_mm_from_diameter(diameter_m * 1e3, ratios)
+        geometry_kwargs = {
+            k: v for k, v in dims_mm.items()
+            if k not in ("inlet_height_mm", "inlet_width_mm")
+        }
+        geometry = geometry_from_dimensions_mm(**geometry_kwargs)
+
+        gas_onehot = torch.tensor([gas_type_to_onehot(gas_type)])
+        rho_t, nu_t = rho_fn(
+            torch.tensor([operating_temp_c]),
+            torch.tensor([operating_press_kpa]),
+            gas_onehot,
+        )
+        rho, nu = rho_t.item(), nu_t.item()
+
+        v_inlet = inlet_velocity_ms(
+            torch.tensor([flow_rate_cfm]),
+            torch.tensor([dims_mm["inlet_height_mm"] * 1e-3]),
+            torch.tensor([dims_mm["inlet_width_mm"] * 1e-3]),
+        ).item()
+        v_z_inlet = inlet_axial_velocity_ms(
+            torch.tensor([flow_rate_cfm]),
+            r_barrel_m=geometry.r_barrel, r_exhaust_m=geometry.r_exhaust,
+        ).item()
+        hydraulic_diameter_m = hydraulic_diameter_rect_m(
+            height_m=dims_mm["inlet_height_mm"] * 1e-3,
+            width_m=dims_mm["inlet_width_mm"] * 1e-3,
+        )
+        k_inlet_t, eps_inlet_t = inlet_turbulence_quantities(
+            v_inlet=torch.tensor([v_inlet]),
+            hydraulic_diameter_m=torch.tensor([hydraulic_diameter_m]),
+            nu=torch.tensor([nu]),
+        )
+
+        q_design = float(v_z_inlet) * math.pi * (
+            geometry.r_barrel ** 2 - geometry.r_exhaust ** 2
+        )
+        # This epoch's physical scale — the D/Q normalization window comes
+        # from template_scaler and does NOT change (see with_scales docstring).
+        scaler = template_scaler.with_scales(
+            length_scale_m=geometry.r_barrel,
+            velocity_scale_ms=max(v_inlet, 1e-6),
+            rho=rho,
+        )
+
+        diameter_m_t = torch.as_tensor(diameter_m, device=device)
+        flow_rate_cfm_t = torch.as_tensor(float(flow_rate_cfm), device=device)
+        rho_scalar_t = torch.as_tensor(rho, device=device)
+        nu_scalar_t = torch.as_tensor(nu, device=device)
+        v_inlet_t = torch.as_tensor(v_inlet, device=device)
+        v_z_inlet_t = torch.as_tensor(v_z_inlet, device=device)
+
+        optimizer.zero_grad(set_to_none=True)
+        loss = _total_loss(
+            model, scaler, geometry, rho_scalar_t, nu_scalar_t, v_inlet_t, v_z_inlet_t,
+            k_inlet_t, eps_inlet_t, q_design, n_interior, device,
+            diameter_m_t, flow_rate_cfm_t,
+        )
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+        optimizer.step()
+        scheduler.step()
+
+        loss_value = float(loss.item())
+        loss_history.append(loss_value)
+        if on_progress is not None and (epoch % progress_every == 0 or epoch == epochs):
+            on_progress(epoch, epochs, loss_value)
+
+    model.eval()
+    history = {
+        "loss": loss_history,
+        "final_loss": loss_history[-1] if loss_history else float("nan"),
+        "wall_time_s": time.time() - start_time,
+    }
+    return model, template_scaler, history
+
+
+def evaluate_parametric_interpolation(
+    model: CycloneFieldPINN,
+    scaler: FieldScaler,
+    ratios: dict[str, float],
+    diameter_m: float,
+    flow_rate_cfm: float,
+    rho: float,
+    operating_temp_c: float = 25.0,
+    operating_press_kpa: float = 101.325,
+    gas_type: str = "Air",
+) -> dict:
+    """
+    Item 4 of the remaining work: check that a parametrically-trained model
+    gives a physically sane result for a (diameter, flow rate) pair it was
+    NOT necessarily trained on directly (any point inside the training
+    ranges other than the exact sampled values counts, since domain
+    randomization draws continuous, not gridded, values).
+
+    Builds the geometry for the requested diameter, evaluates the trained
+    model on it (via evaluate_grid, which only needs diameter_m/
+    flow_rate_cfm — no retraining), and runs the same mass-conservation
+    check used in production (sanity_check.mass_conservation_metrics) so
+    "does it interpolate reasonably" has a concrete pass/fail signal instead
+    of just eyeballing a plot.
+    """
+    dims_mm = geometry_mm_from_diameter(diameter_m * 1e3, ratios)
+    geometry_kwargs = {
+        k: v for k, v in dims_mm.items()
+        if k not in ("inlet_height_mm", "inlet_width_mm")
+    }
+    geometry = geometry_from_dimensions_mm(**geometry_kwargs)
+
+    gas_onehot = torch.tensor([gas_type_to_onehot(gas_type)])
+    _, nu_t = fluid_properties(
+        torch.tensor([operating_temp_c]), torch.tensor([operating_press_kpa]), gas_onehot,
+    )
+    nu = nu_t.item()
+
+    v_z_inlet = inlet_axial_velocity_ms(
+        torch.tensor([flow_rate_cfm]),
+        r_barrel_m=geometry.r_barrel, r_exhaust_m=geometry.r_exhaust,
+    ).item()
+    q_design = float(v_z_inlet) * math.pi * (
+        geometry.r_barrel ** 2 - geometry.r_exhaust ** 2
+    )
+
+    eval_scaler = scaler.with_scales(
+        length_scale_m=geometry.r_barrel,
+        velocity_scale_ms=max(
+            inlet_velocity_ms(
+                torch.tensor([flow_rate_cfm]),
+                torch.tensor([dims_mm["inlet_height_mm"] * 1e-3]),
+                torch.tensor([dims_mm["inlet_width_mm"] * 1e-3]),
+            ).item(),
+            1e-6,
+        ),
+        rho=rho,
+    )
+    grid = evaluate_grid(model, eval_scaler, geometry, diameter_m=diameter_m, flow_rate_cfm=flow_rate_cfm)
+    mc = mass_conservation_metrics(grid, q_design=q_design)
+    grid["mass_conservation_status"] = mc["status"]
+    grid["mass_flow_spread"] = mc["rel_spread"]
+    return grid
 
 
 # ─────────────────────────────────────────────────────────────────────────

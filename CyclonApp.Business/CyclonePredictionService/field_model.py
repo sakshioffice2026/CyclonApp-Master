@@ -107,6 +107,29 @@ class FieldScaler:
             "eps": F.softplus(raw[:, 5]) * self.E,
         }
 
+    def with_scales(self, length_scale_m: float, velocity_scale_ms: float, rho: float) -> "FieldScaler":
+        """Returns a new FieldScaler for a different geometry/operating point
+        while keeping THIS scaler's diameter/flow-rate normalization window
+        fixed.
+
+        Needed for parametric (domain-randomization) training: every epoch
+        trains on a different sampled geometry/flow rate, so the *physical*
+        length/velocity scale (L, U, P, K, E) must change every step to
+        match whatever geometry is currently sampled. But the *parametric*
+        D/Q normalization window (D_min/D_max/Q_min/Q_max) must stay the
+        SAME for the whole training run — if it moved every epoch,
+        D_norm=0.3 would mean a different actual diameter from one epoch to
+        the next, and the network could never learn a consistent mapping
+        from the conditioning inputs to the field.
+        """
+        return FieldScaler(
+            length_scale_m=length_scale_m,
+            velocity_scale_ms=velocity_scale_ms,
+            rho=rho,
+            diameter_range_m=(self.D_min, self.D_max),
+            flow_rate_range_cfm=(self.Q_min, self.Q_max),
+        )
+
     def state_dict(self):
         return {
             "L": self.L, "U": self.U, "P": self.P, "K": self.K, "E": self.E,
@@ -243,4 +266,4 @@ def evaluate_grid(
         "v_theta_ms": out["v_theta"].cpu().tolist(),
         "v_z_ms": out["v_z"].cpu().tolist(),
         "pressure_pa": out["p"].cpu().tolist(),
-    } 
+    }
