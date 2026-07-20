@@ -645,6 +645,31 @@ public class DesignController : Controller
                 return NotFound(new { error = "Job not found — it may have expired. Start a new field prediction." });
             }
 
+            // ROOT-CAUSE FIX: _engineeringInsight was injected into this
+            // controller but never actually called anywhere — the whole
+            // Engineering Insights feature (DTOs, repository, partial view)
+            // was wired up except this one call, so status.Insights was
+            // always null and the UI panel had nothing to render. Only
+            // attempt this once the field solve has actually completed and
+            // produced a result; a bad/incomplete insight must never mask
+            // or break the underlying field-solve result the client is
+            // waiting on, so failures here are logged and swallowed rather
+            // than turned into a 503 for the whole status poll.
+            if (status.Status == "completed" && status.Result != null)
+            {
+                try
+                {
+                    status.Insights = _engineeringInsight.GenerateReport(status.Result);
+                }
+                catch (Exception ex)
+                {
+                    _uow.exceptionHandlerRepository.SaveException(
+                        "DesignController",
+                        "FieldPredictionStatus.GenerateReport",
+                        ex.ToString());
+                }
+            }
+
             return Ok(status);
         }
         catch (Exception ex)
@@ -656,6 +681,46 @@ public class DesignController : Controller
 
             return StatusCode(StatusCodes.Status503ServiceUnavailable,
                 new { error = "The field prediction service is unavailable. Please try again shortly." });
+        }
+    }
+
+    [HttpGet]
+    public async Task<IActionResult> EngineeringInsightPdf(string jobId, string? tagNumber, int revisionNumber, string? projectName)
+    {
+        try
+        {
+            var status = await _predictionRepository.GetFieldPredictionStatusAsync(jobId);
+            if (status == null || status.Status != "completed" || status.Result == null)
+            {
+                // Opened via window.open from the results page — a small
+                // inline error page is friendlier here than a JSON 404,
+                // since there's no surrounding page chrome to show it in.
+                return Content(
+                    "<html><body style=\"font-family:sans-serif;padding:40px;color:#dc2626\">" +
+                    "<h2>Report unavailable</h2>" +
+                    "<p>This field-solve result has expired or is no longer available. " +
+                    "Please re-run the field solve on the Results page and try again.</p>" +
+                    "</body></html>",
+                    "text/html", System.Text.Encoding.UTF8);
+            }
+
+            var report = _engineeringInsight.GenerateReport(status.Result);
+            var html = _engineeringInsight.BuildReportHtml(report, tagNumber, revisionNumber, projectName);
+
+            // Returns HTML in browser — user can File > Print > Save as PDF,
+            // same approach ExportController.Pdf uses for the main design
+            // report (see ExportRepository.GeneratePdfAsync's comment).
+            return Content(html, "text/html", System.Text.Encoding.UTF8);
+        }
+        catch (Exception ex)
+        {
+            _uow.exceptionHandlerRepository.SaveException(
+                "DesignController",
+                "EngineeringInsightPdf",
+                ex.ToString());
+
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                new { error = "Could not generate the insight report. Please try again shortly." });
         }
     }
 

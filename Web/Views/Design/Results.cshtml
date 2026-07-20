@@ -235,7 +235,10 @@
                 <div class="d-flex align-items-center gap-2">
                     <span class="badge d-none" id="fieldSolveStatusBadge"></span>
                     <button type="button" class="btn btn-primary btn-sm" id="btnStartFieldSolve"
-                            data-revision-id="@Model.RevisionId">
+                            data-revision-id="@Model.RevisionId"
+                            data-tag-number="@Model.TagNumber"
+                            data-revision-number="@Model.RevisionNumber"
+                            data-project-name="@Model.ProjectName">
                         <i class="bi bi-cpu me-1"></i>Run Field Solve
                     </button>
                 </div>
@@ -307,6 +310,13 @@
                         Axisymmetric cross-section: horizontal = radius from centerline r (m), vertical = height
                         from top of barrel z (m). Each point is a solved grid location, colored by the selected field.
                     </p>
+
+                    @* ROOT-CAUSE FIX: this partial existed in the repo but was never
+                       included anywhere, so #engineering-insights-panel and
+                       renderEngineeringInsights() never existed on the rendered page
+                       at all — see renderResult() below for the matching JS-side fix
+                       (calling renderEngineeringInsights with status.insights). *@
+                    <partial name="_EngineeringInsights" />
                 </div>
             </div>
         </div>
@@ -849,6 +859,7 @@
             let pollTimer     = null;
             let pollStartedAt = null;
             let lastResult    = null;
+            let lastJobId     = null;
             let fieldChart    = null;
 
             // Field labels for the chart legend/tooltip — keys match the
@@ -939,6 +950,7 @@
 
             async function pollStatus(jobId) {
                 stopPolling();
+                lastJobId = jobId;
 
                 if (Date.now() - pollStartedAt > MAX_POLL_MS) {
                     showError('This is taking longer than expected. Check back later or try again.');
@@ -989,6 +1001,27 @@
                 document.getElementById('fsNu').textContent      = r.nuM2s.toExponential(3) + ' m²/s';
                 document.getElementById('fsVInlet').textContent  = r.vInletMs.toFixed(2) + ' m/s';
                 document.getElementById('fsPoints').textContent  = r.rMeters.length.toLocaleString();
+
+                // ROOT-CAUSE FIX: the partial's own renderEngineeringInsights()
+                // function was already correct, but nothing ever called it — the
+                // status response's `insights` field was just sitting unused here.
+                // ROOT-CAUSE FIX (download PDF): this script runs inside an
+                // IIFE, so lastJobId/revisionId aren't reachable from the
+                // separate _EngineeringInsights.cshtml script block —
+                // publish what its "Download PDF" button needs here.
+                window.__cycloneInsightContext = {
+                    jobId: lastJobId,
+                    tagNumber: btn.dataset.tagNumber || '',
+                    revisionNumber: btn.dataset.revisionNumber || '',
+                    projectName: btn.dataset.projectName || '',
+                };
+
+                if (status.insights) {
+                    renderEngineeringInsights(status.insights);
+                } else {
+                    const panel = document.getElementById('engineering-insights-panel');
+                    if (panel) panel.style.display = 'none';
+                }
 
                 showState('completed');
                 drawFieldChart(fieldSelect.value);

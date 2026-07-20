@@ -41,6 +41,14 @@ namespace CyclonApp.Model.DTOs
 
         [JsonPropertyName("completedAtUtc")]
         public DateTime? CompletedAtUtc { get; set; }
+
+        /// <summary>AI Engineering Insights health report for this job's
+        /// result, computed by IEngineeringInsight.GenerateReport once the
+        /// job is "completed". Null while running/failed, or if insight
+        /// generation itself threw (a bad insight must never break the
+        /// underlying field-solve result the client already has).</summary>
+        [JsonPropertyName("insights")]
+        public CycloneHealthReportDto? Insights { get; set; }
     }
 
     /// <summary>

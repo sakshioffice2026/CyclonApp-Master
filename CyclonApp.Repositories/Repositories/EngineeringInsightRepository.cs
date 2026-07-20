@@ -80,6 +80,130 @@ namespace CyclonApp.Repositories.Repositories
             };
         }
 
+        public string BuildReportHtml(CycloneHealthReportDto report, string? tagNumber, int revisionNumber, string? projectName)
+        {
+            if (report == null) throw new ArgumentNullException(nameof(report));
+
+            string scoreColor = report.HealthScore >= 90 ? "#16a34a"
+                               : report.HealthScore >= 75 ? "#0891b2"
+                               : report.HealthScore >= 60 ? "#d97706" : "#dc2626";
+
+            string pv = report.PhysicsValidation == null ? "" : $@"
+      <table>
+        <tr><th>Check</th><th>Result</th></tr>
+        {PhysicsRow("Mass Conservation", report.PhysicsValidation.MassConservationPassed)}
+        {PhysicsRow("Boundary Conditions", report.PhysicsValidation.BoundaryConditionsPassed)}
+        {PhysicsRow("Model Convergence", report.PhysicsValidation.ConvergencePassed)}
+      </table>
+      <p style=""margin-top:8px;font-size:11.5px;color:#64748b;"">
+        Simulation Confidence: <strong>{report.PhysicsValidation.ConfidencePercent:F0}%</strong>
+      </p>";
+
+            string cards = string.Concat((report.Insights ?? new List<EngineeringInsightDto>()).Select(i =>
+            {
+                var (color, icon) = i.Severity switch
+                {
+                    InsightSeverity.Critical => ("#dc2626", "&#10006;"),
+                    InsightSeverity.Warning => ("#d97706", "&#9888;"),
+                    _ => ("#16a34a", "&#10003;"),
+                };
+                string impact = (i.Impact != null && i.Impact.Count > 0)
+                    ? "<ul>" + string.Concat(i.Impact.Select(x => $"<li>{x}</li>")) + "</ul>"
+                    : "";
+                return $@"
+      <div style=""border-left:4px solid {color};padding:10px 14px;margin-bottom:10px;background:#fafafa;border-radius:0 6px 6px 0;"">
+        <div style=""font-weight:700;color:{color};"">{icon} {i.Category}</div>
+        <div style=""margin-top:4px;""><strong>What happened?</strong> {i.WhatHappened}</div>
+        <div style=""margin-top:2px;""><strong>Why?</strong> {i.Why}</div>
+        {(impact.Length > 0 ? $"<div style='margin-top:2px;'><strong>Impact:</strong>{impact}</div>" : "")}
+        <div style=""margin-top:2px;""><strong>Recommendation:</strong> {i.Recommendation}</div>
+      </div>";
+            }));
+
+            string risks = string.Concat((report.RiskIndicators ?? new List<RiskIndicatorDto>()).Select(r =>
+            {
+                string color = r.Level == "High" ? "#dc2626" : r.Level == "Medium" ? "#d97706" : "#16a34a";
+                double pct = Math.Clamp(r.Percent, 0, 100);
+                return $@"
+      <div style=""margin-bottom:10px;"">
+        <div style=""font-size:11.5px;margin-bottom:3px;"">{r.Name} &mdash; {r.Percent:F1}% ({r.Level})</div>
+        <div style=""background:#e2e8f0;height:10px;width:100%;max-width:320px;border-radius:5px;overflow:hidden;"">
+          <div style=""background:{color};height:10px;width:{pct.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}%;""></div>
+        </div>
+      </div>";
+            }));
+
+            return $@"<!DOCTYPE html>
+<html lang=""en"">
+<head>
+<meta charset=""UTF-8""/>
+<title>AI Engineering Insight Report — {tagNumber ?? "—"} Rev {revisionNumber}</title>
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{font-family:'Segoe UI',Arial,sans-serif;font-size:12px;color:#1e293b;background:#fff}}
+  .page{{padding:28px 32px;max-width:900px;margin:0 auto}}
+  .report-header{{background:linear-gradient(135deg,#1a56db,#1240a8);color:#fff;padding:24px 28px;border-radius:10px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center}}
+  .report-title{{font-size:20px;font-weight:700}}
+  .report-sub{{font-size:12px;opacity:.8;margin-top:4px}}
+  .score-badge{{text-align:right}}
+  .score-value{{font-size:32px;font-weight:800;line-height:1}}
+  .score-grade{{font-size:12.5px;opacity:.9;margin-top:2px}}
+  .section{{margin-bottom:18px}}
+  .section-title{{font-size:13px;font-weight:700;color:#1a56db;border-bottom:2px solid #1a56db;padding-bottom:5px;margin-bottom:10px}}
+  table{{width:100%;border-collapse:collapse;font-size:11.5px}}
+  th{{background:#1a56db;color:#fff;padding:7px 10px;text-align:left;font-weight:600}}
+  td{{padding:6px 10px;border-bottom:1px solid #f1f5f9}}
+  tr:nth-child(even) td{{background:#f8fafc}}
+  .summary-box{{background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:14px 16px;font-style:italic;font-size:12px;}}
+  .report-footer{{margin-top:24px;padding-top:12px;border-top:1px solid #e2e8f0;display:flex;justify-content:space-between;font-size:10.5px;color:#94a3b8}}
+  @media print{{body{{-webkit-print-color-adjust:exact;print-color-adjust:exact}}.page{{padding:8px}}@page{{margin:10mm;size:A4}}.report-header{{border-radius:0}}}}
+</style>
+</head>
+<body>
+<div class=""page"">
+  <div class=""report-header"">
+    <div>
+      <div class=""report-title"">&#129504; AI Engineering Insight Report</div>
+      <div class=""report-sub"">Tag: {tagNumber ?? "—"} &nbsp;&middot;&nbsp; {(string.IsNullOrEmpty(projectName) ? "" : projectName + " &nbsp;&middot;&nbsp; ")}Revision {revisionNumber}</div>
+    </div>
+    <div class=""score-badge"">
+      <div class=""score-value"" style=""color:#fff;"">{report.HealthScore:F0}<span style=""font-size:16px;opacity:.7"">/100</span></div>
+      <div class=""score-grade"">{report.Grade}</div>
+    </div>
+  </div>
+
+  <div class=""section"">
+    <div class=""section-title"">Physics Validation</div>
+    {pv}
+  </div>
+
+  <div class=""section"">
+    <div class=""section-title"">Engineering Insights</div>
+    {(cards.Length > 0 ? cards : "<p style='color:#64748b;font-size:11.5px;'>No specific insights flagged for this run.</p>")}
+  </div>
+
+  <div class=""section"">
+    <div class=""section-title"">Risk Indicators</div>
+    {(risks.Length > 0 ? risks : "<p style='color:#64748b;font-size:11.5px;'>No risk indicators available.</p>")}
+  </div>
+
+  <div class=""section"">
+    <div class=""section-title"">Summary</div>
+    <div class=""summary-box"">{report.Summary}</div>
+  </div>
+
+  <div class=""report-footer"">
+    <span>Generated by Cyclone Design App — AI Engineering Insight &nbsp;&middot;&nbsp; {DateTime.UtcNow:dd MMM yyyy HH:mm} UTC</span>
+    <span>CONFIDENTIAL — Engineering Use Only</span>
+  </div>
+</div>
+</body>
+</html>";
+        }
+
+        private static string PhysicsRow(string label, bool passed) =>
+            $"<tr><td>{label}</td><td style='color:{(passed ? "#16a34a" : "#dc2626")};font-weight:600;'>{(passed ? "&#10003; Passed" : "&#10006; Failed")}</td></tr>";
+
         // ── Individual rule evaluators ──────────────────────────────────
 
         private EngineeringInsightDto EvaluatePressureDrop(double pressureDropPa)

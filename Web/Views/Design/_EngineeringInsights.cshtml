@@ -4,7 +4,12 @@
    object from the FieldPredictionStatus JSON response once status is "completed". *@
 
 <div id="engineering-insights-panel" style="display:none; margin-top:24px; font-family:inherit;">
-    <h3>AI Engineering Insights</h3>
+    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+        <h3 style="margin:0;">AI Engineering Insights</h3>
+        <button type="button" id="btnDownloadInsightPdf" class="btn btn-outline-danger btn-sm">
+            Download PDF
+        </button>
+    </div>
 
     <div id="ei-health-score" style="font-size:2em; font-weight:bold;"></div>
     <div id="ei-grade" style="margin-bottom:16px;"></div>
@@ -99,4 +104,25 @@
 
         document.getElementById("ei-summary").textContent = insights.summary || "";
     }
+
+    (function () {
+        const downloadBtn = document.getElementById("btnDownloadInsightPdf");
+        if (!downloadBtn) return;
+
+        downloadBtn.addEventListener("click", function () {
+            const ctx = window.__cycloneInsightContext;
+            if (!ctx || !ctx.jobId) {
+                alert("Run the field solve first, then you can download the insight report.");
+                return;
+            }
+
+            const params = new URLSearchParams({
+                jobId: ctx.jobId,
+                tagNumber: ctx.tagNumber || "",
+                revisionNumber: ctx.revisionNumber || "",
+                projectName: ctx.projectName || "",
+            });
+            window.open("/Design/EngineeringInsightPdf?" + params.toString(), "_blank");
+        });
+    })();
 </script>

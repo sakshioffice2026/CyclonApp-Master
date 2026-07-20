@@ -1,5 +1,5 @@
 ﻿using System.ComponentModel.DataAnnotations;
-using CyclonApp.Database;  
+using CyclonApp.Database;
 
 
 namespace CyclonApp.Model.ViewModel;
@@ -68,7 +68,7 @@ public class DesignCalculateViewModel
     public decimal FlowRateCFM { get; set; } = 800;
 
     [Required, Range(0.5, 100), Display(Name = "Inlet Line Size (inches Ø)")]
-    public decimal InletLineSizeIn { get; set; } = 6;
+    public decimal InletLineSizeIn { get; set; } = 5;
 
     [Display(Name = "Gas Type")]
     public string GasType { get; set; } = "Air";
@@ -112,7 +112,7 @@ public class DesignCalculateViewModel
 
     [Display(Name = "Auto-Calculate Viscosity")]
     public bool ViscosityAutoCalc { get; set; } = true;
-    
+
     [Range(1, 100), Display(Name = "Number of Cyclones in Parallel")]
     public int NumberOfCyclones { get; set; } = 1;
 
