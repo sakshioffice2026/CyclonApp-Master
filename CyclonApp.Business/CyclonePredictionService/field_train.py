@@ -155,13 +155,19 @@ def save_field_checkpoint(
     v_z_inlet: float,
     k_inlet: float,
     eps_inlet: float,
+    flow_rate_cfm: float,
     hidden: int,
     n_layers: int,
 ) -> None:
     """Saves everything app.py needs to run inference with zero training:
     model weights + the exact scaler/geometry/fluid constants that give
     those weights meaning. `geometry` is a plain-attribute object (no
-    tensors/handles), so it pickles safely via torch.save."""
+    tensors/handles), so it pickles safely via torch.save.
+
+    flow_rate_cfm is stored explicitly because CycloneFieldPINN.forward
+    takes it as an explicit conditioning input (alongside diameter_m) —
+    without it here, app.py's inference path has no way to reconstruct
+    the value the network was actually trained against."""
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -175,6 +181,7 @@ def save_field_checkpoint(
             "v_z_inlet": v_z_inlet,
             "k_inlet": k_inlet,
             "eps_inlet": eps_inlet,
+            "flow_rate_cfm": flow_rate_cfm,
         },
         path,
     )
@@ -783,6 +790,7 @@ def run_field_prediction_job(
             v_z_inlet=v_z_inlet,
             k_inlet=k_inlet,
             eps_inlet=eps_inlet,
+            flow_rate_cfm=flow_rate_cfm,
             hidden=train_kwargs.get("hidden", 64),
             n_layers=train_kwargs.get("n_layers", 6),
         )

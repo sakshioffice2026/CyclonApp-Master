@@ -126,6 +126,7 @@ def _load_field_checkpoint(path: str) -> dict:
         "v_z_inlet": ckpt["v_z_inlet"],
         "k_inlet": ckpt["k_inlet"],
         "eps_inlet": ckpt["eps_inlet"],
+        "flow_rate_cfm": ckpt["flow_rate_cfm"],
     }
 
 
@@ -245,7 +246,11 @@ def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
         # INFERENCE ONLY — no training here. Uses the model/scaler/geometry
         # loaded once at startup from FIELD_MODEL_CHECKPOINT_PATH.
         state = _inference_state
-        grid = evaluate_grid(state["model"], state["scaler"], state["geometry"])
+        grid = evaluate_grid(
+            state["model"], state["scaler"], state["geometry"],
+            diameter_m=2.0 * state["geometry"].r_barrel,
+            flow_rate_cfm=state["flow_rate_cfm"],
+        )
 
         q_design = float(state["v_z_inlet"]) * math.pi * (
             state["geometry"].r_barrel ** 2 - state["geometry"].r_exhaust ** 2
