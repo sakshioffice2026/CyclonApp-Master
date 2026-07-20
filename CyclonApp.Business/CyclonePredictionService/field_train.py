@@ -120,6 +120,57 @@ CONTINUITY_LOSS_WEIGHT = 5.0
 OnProgressFn = Callable[[int, int, float], None]
 
 # ─────────────────────────────────────────────────────────────────────────
+# PRODUCTION INFERENCE CHECKPOINT (train once, e.g. in Colab, deploy the
+# checkpoint, serve inference-only in app.py — no training after deploy).
+#
+# NOTE — this only produces correct results for the exact geometry/
+# operating point it was trained on. CycloneFieldPINN takes only (r, z) as
+# input; geometry and operating condition are baked in as fixed constants
+# at training time (see module docstring above). A single checkpoint is
+# therefore tied to one design, not a general-purpose model — this is a
+# deliberate, explicit tradeoff, not an oversight. Saving state_dict()
+# alone is NOT sufficient to reproduce correct predictions: the network's
+# inputs/outputs are only meaningful relative to the exact FieldScaler
+# (L/U/P/K/E) and geometry it was trained against, so both are stored
+# alongside the weights.
+# ─────────────────────────────────────────────────────────────────────────
+
+def save_field_checkpoint(
+    path: str,
+    model: "CycloneFieldPINN",
+    scaler: FieldScaler,
+    geometry: CycloneAxisymGeometry,
+    rho: float,
+    nu: float,
+    v_inlet: float,
+    v_z_inlet: float,
+    k_inlet: float,
+    eps_inlet: float,
+    hidden: int,
+    n_layers: int,
+) -> None:
+    """Saves everything app.py needs to run inference with zero training:
+    model weights + the exact scaler/geometry/fluid constants that give
+    those weights meaning. `geometry` is a plain-attribute object (no
+    tensors/handles), so it pickles safely via torch.save."""
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "hidden": hidden,
+            "n_layers": n_layers,
+            "scaler_state_dict": scaler.state_dict(),
+            "geometry": geometry,
+            "rho": rho,
+            "nu": nu,
+            "v_inlet": v_inlet,
+            "v_z_inlet": v_z_inlet,
+            "k_inlet": k_inlet,
+            "eps_inlet": eps_inlet,
+        },
+        path,
+    )
+
+# ─────────────────────────────────────────────────────────────────────────
 # RESIDUAL NON-DIMENSIONALIZATION (root-cause fix for loss reaching
 # 1e18-1e23 at realistic inlet velocities — confirmed empirically, not
 # theoretical: a freshly-initialized network at v_inlet=78.66 m/s produces
@@ -584,6 +635,7 @@ def run_field_prediction_job(
     epochs_adam: int = 3000,
     epochs_lbfgs: int = 300,
     on_progress: Optional[OnProgressFn] = None,
+    save_checkpoint_path: Optional[str] = None,
     **train_kwargs,
 ) -> dict:
     """
@@ -604,6 +656,9 @@ def run_field_prediction_job(
             see field_physics.fluid_properties / field_physics.gas_type_to_onehot
         epochs_adam, epochs_lbfgs: forwarded to train_field_model
         on_progress: forwarded to train_field_model
+        save_checkpoint_path: if set, calls save_field_checkpoint() with
+            this path after training completes — this is the "train once,
+            deploy the file" step for production inference (see app.py).
         **train_kwargs: any other train_field_model kwarg (n_interior,
             hidden, n_layers, lr_adam_start, ..., device, seed, ...)
 
@@ -686,6 +741,22 @@ def run_field_prediction_job(
     grid["mass_conservation_status"] = mc["status"]
     grid["mass_flow_spread"] = mc["rel_spread"]
 
+    if save_checkpoint_path:
+        save_field_checkpoint(
+            save_checkpoint_path,
+            model=model,
+            scaler=scaler,
+            geometry=geometry,
+            rho=rho,
+            nu=nu,
+            v_inlet=v_inlet,
+            v_z_inlet=v_z_inlet,
+            k_inlet=k_inlet,
+            eps_inlet=eps_inlet,
+            hidden=train_kwargs.get("hidden", 64),
+            n_layers=train_kwargs.get("n_layers", 6),
+        )
+
     return {
         "geometry": geometry,
         "rho": rho,
@@ -753,6 +824,13 @@ def _build_arg_parser():
     out = p.add_argument_group("output")
     out.add_argument("--output-json", type=str, default=None,
                       help="if set, write the full grid result + history to this path")
+    out.add_argument("--save-checkpoint", type=str, default=None,
+                      help="if set, save a production inference checkpoint "
+                           "(model + scaler + geometry + fluid constants) to "
+                           "this path, e.g. cyclone_model.pth — this is the "
+                           "'train once, deploy the file' step; load it in "
+                           "app.py for inference-only serving with no "
+                           "training after deploy")
 
     return p
 
@@ -798,6 +876,7 @@ def main(argv: Optional[list] = None) -> None:
         seed=args.seed,
         on_progress=on_progress,
         progress_every=args.progress_every,
+        save_checkpoint_path=args.save_checkpoint,
     )
 
     history = result["history"]
@@ -827,6 +906,9 @@ def main(argv: Optional[list] = None) -> None:
         with open(args.output_json, "w") as f:
             json.dump(payload, f)
         print(f"Wrote grid result to {args.output_json}")
+
+    if args.save_checkpoint:
+        print(f"Saved production inference checkpoint to {args.save_checkpoint}")
 
 
 if __name__ == "__main__":

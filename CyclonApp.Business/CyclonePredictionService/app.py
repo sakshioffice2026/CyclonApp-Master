@@ -60,15 +60,22 @@ Run:
     uvicorn app:app --host 0.0.0.0 --port 8000
 """
 from __future__ import annotations
+import math
 import threading
 import time
 import uuid
 from typing import Optional
 
+import os
+
+import torch
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
 
+from field_model import CycloneFieldPINN, FieldScaler, evaluate_grid
 from field_train import run_field_prediction_job
+from sanity_check import mass_conservation_metrics
 
 app = FastAPI(title="Cyclone Prediction Service (Physics-Informed)")
 
@@ -77,6 +84,57 @@ app = FastAPI(title="Cyclone Prediction Service (Physics-Informed)")
 MAX_CONCURRENT_FIELD_JOBS = 2
 FIELD_JOB_TTL_SECONDS = 3600  # finished jobs are swept 1 hour after completion
 FIELD_JOB_SWEEP_INTERVAL_SECONDS = 300
+
+# ─────────────────────────────────────────────────────────────────────────
+# PRODUCTION INFERENCE MODE — train once (e.g. in Colab via
+# `python field_train.py ... --save-checkpoint cyclone_model.pth`), deploy
+# the checkpoint alongside this service, load it once at startup, and serve
+# every request from the already-trained weights. No training happens after
+# deploy: _run_field_job below calls evaluate_grid() on the loaded model
+# instead of run_field_prediction_job()'s train_field_model() call.
+#
+# IMPORTANT — same caveat as field_train.py's checkpoint-save comment: this
+# checkpoint is trained for ONE fixed geometry/operating point (see
+# field_train.py module docstring — CycloneFieldPINN bakes geometry in as
+# constants, it does not take them as inputs). Every request is served from
+# that single trained design; incoming geometry/flow/gas fields on the
+# request are accepted (so the existing PredictFieldStartRequest/.NET
+# contract is unchanged) but do not change the result. A mismatch warning
+# is logged so this isn't a silent surprise if the UI is later used to vary
+# designs against a checkpoint trained for a different one.
+# ─────────────────────────────────────────────────────────────────────────
+FIELD_MODEL_CHECKPOINT_PATH = os.environ.get(
+    "FIELD_MODEL_CHECKPOINT_PATH", "cyclone_model.pth"
+)
+
+_inference_state: Optional[dict] = None  # populated by _load_field_checkpoint()
+
+
+def _load_field_checkpoint(path: str) -> dict:
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    model = CycloneFieldPINN(hidden=ckpt["hidden"], n_layers=ckpt["n_layers"])
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+    scaler = FieldScaler.from_state_dict(ckpt["scaler_state_dict"])
+    return {
+        "model": model,
+        "scaler": scaler,
+        "geometry": ckpt["geometry"],
+        "rho": ckpt["rho"],
+        "nu": ckpt["nu"],
+        "v_inlet": ckpt["v_inlet"],
+        "v_z_inlet": ckpt["v_z_inlet"],
+        "k_inlet": ckpt["k_inlet"],
+        "eps_inlet": ckpt["eps_inlet"],
+    }
+
+
+@app.on_event("startup")
+def load_field_model_checkpoint():
+    global _inference_state
+    _inference_state = _load_field_checkpoint(FIELD_MODEL_CHECKPOINT_PATH)
+    print(f"[startup] Loaded inference-only field model from "
+          f"{FIELD_MODEL_CHECKPOINT_PATH}")
 
 
 @app.get("/health")
@@ -152,53 +210,62 @@ _field_jobs: dict[str, dict] = {}
 _field_jobs_lock = threading.Lock()
 _field_jobs_running_count = 0  # guarded by _field_jobs_lock
 
-# Training defaults for the on-demand job. Chosen as a starting balance
-# between wait time and convergence quality — validated to run cleanly
-# end-to-end, NOT yet validated at exactly these epoch counts for full
-# convergence; tune based on real usage once this is live.
+# NOT USED by the live path anymore (see PRODUCTION INFERENCE MODE above —
+# _run_field_job now serves the checkpoint loaded at startup instead of
+# calling run_field_prediction_job/training). Left in place only for the
+# offline retraining path (field_train.py's own CLI is the actual "how do I
+# retrain" entry point going forward); harmless if unused.
 FIELD_JOB_EPOCHS_ADAM = 5
 FIELD_JOB_EPOCHS_LBFGS = 2
+
+
+def _warn_if_request_differs_from_trained_design(req: PredictFieldStartRequest) -> None:
+    """The loaded checkpoint was trained for one fixed geometry/operating
+    point (see PRODUCTION INFERENCE MODE note above). This does not block
+    or alter the request — it only makes a design mismatch visible in logs
+    instead of silently returning results for a different design than the
+    one requested."""
+    geo = _inference_state["geometry"]
+    trained_r_barrel_mm = geo.r_barrel * 2000.0
+    if abs(trained_r_barrel_mm - req.barrel_diameter_mm) > 1e-3:
+        print(
+            f"[predict_field] WARNING: request barrel_diameter_mm="
+            f"{req.barrel_diameter_mm} differs from the checkpoint's trained "
+            f"design ({trained_r_barrel_mm} mm). Serving the trained "
+            f"design's precomputed field regardless — this checkpoint does "
+            f"not retrain per request."
+        )
 
 
 def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
     global _field_jobs_running_count
     try:
-        def on_progress(epoch, total, loss):
-            with _field_jobs_lock:
-                if job_id in _field_jobs:
-                    _field_jobs[job_id]["progress"] = f"{epoch}/{total}"
+        _warn_if_request_differs_from_trained_design(req)
 
-        result = run_field_prediction_job(
-            barrel_diameter_mm=req.barrel_diameter_mm,
-            barrel_height_mm=req.barrel_height_mm,
-            cone_height_mm=req.cone_height_mm,
-            exhaust_dia_mm=req.exhaust_dia_mm,
-            exhaust_length_mm=req.exhaust_length_mm,
-            bottom_outlet_mm=req.bottom_outlet_mm,
-            inlet_height_mm=req.inlet_height_mm,
-            inlet_width_mm=req.inlet_width_mm,
-            flow_rate_cfm=req.flow_rate_cfm,
-            operating_temp_c=req.operating_temp_c,
-            operating_press_kpa=req.operating_press_kpa,
-            gas_type=req.gas_type,
-            epochs_adam=FIELD_JOB_EPOCHS_ADAM,
-            epochs_lbfgs=FIELD_JOB_EPOCHS_LBFGS,
-            on_progress=on_progress,
+        # INFERENCE ONLY — no training here. Uses the model/scaler/geometry
+        # loaded once at startup from FIELD_MODEL_CHECKPOINT_PATH.
+        state = _inference_state
+        grid = evaluate_grid(state["model"], state["scaler"], state["geometry"])
+
+        q_design = float(state["v_z_inlet"]) * math.pi * (
+            state["geometry"].r_barrel ** 2 - state["geometry"].r_exhaust ** 2
         )
+        mc = mass_conservation_metrics(grid, q_design=q_design)
+        grid["mass_conservation_status"] = mc["status"]
+        grid["mass_flow_spread"] = mc["rel_spread"]
 
-        grid = result["grid"]
         field_result = FieldResultDto(
             r_m=grid["r_m"], z_m=grid["z_m"],
             v_r_ms=grid["v_r_ms"], v_theta_ms=grid["v_theta_ms"],
             v_z_ms=grid["v_z_ms"], pressure_pa=grid["pressure_pa"],
-            rho_kgm3=result["rho"], nu_m2s=result["nu"], v_inlet_ms=result["v_inlet"],
+            rho_kgm3=state["rho"], nu_m2s=state["nu"], v_inlet_ms=state["v_inlet"],
             # Mass-conservation diagnostics — see run_field_prediction_job's
             # "Root-cause fix" comment. Previously always omitted (None on
             # the wire), which made the .NET Engineering Insights panel
             # treat every completed job as a mass-conservation failure.
             mass_conservation_status=grid.get("mass_conservation_status"),
             mass_flow_spread=grid.get("mass_flow_spread"),
-            final_loss=result["history"].get("final_loss"),
+            final_loss=None,  # no training occurred for this request
         )
 
         with _field_jobs_lock:
