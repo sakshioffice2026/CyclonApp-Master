@@ -128,6 +128,13 @@ class FieldResultDto(BaseModel):
     nu_m2s: float = Field(alias="NuM2s")
     v_inlet_ms: float = Field(alias="VInletMs")
 
+    # Mass-conservation diagnostics — optional/nullable to match the .NET
+    # side's FieldResultDto, which treats their absence as "not computed"
+    # rather than an error.
+    mass_conservation_status: Optional[str] = Field(alias="MassConservationStatus", default=None)
+    mass_flow_spread: Optional[float] = Field(alias="MassFlowSpread", default=None)
+    final_loss: Optional[float] = Field(alias="FinalLoss", default=None)
+
 
 class PredictFieldStatusResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -185,6 +192,13 @@ def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
             v_r_ms=grid["v_r_ms"], v_theta_ms=grid["v_theta_ms"],
             v_z_ms=grid["v_z_ms"], pressure_pa=grid["pressure_pa"],
             rho_kgm3=result["rho"], nu_m2s=result["nu"], v_inlet_ms=result["v_inlet"],
+            # Mass-conservation diagnostics — see run_field_prediction_job's
+            # "Root-cause fix" comment. Previously always omitted (None on
+            # the wire), which made the .NET Engineering Insights panel
+            # treat every completed job as a mass-conservation failure.
+            mass_conservation_status=grid.get("mass_conservation_status"),
+            mass_flow_spread=grid.get("mass_flow_spread"),
+            final_loss=result["history"].get("final_loss"),
         )
 
         with _field_jobs_lock:

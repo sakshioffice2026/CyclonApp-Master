@@ -76,7 +76,8 @@ namespace CyclonApp.Repositories.Repositories
                 PhysicsValidation = physics,
                 Insights = insights,
                 RiskIndicators = riskIndicators,
-                Summary = BuildSummary(healthScore, insights, physics)
+                Summary = BuildSummary(healthScore, insights, physics),
+                Conclusion = BuildConclusion(healthScore, insights, physics)
             };
         }
 
@@ -190,6 +191,18 @@ namespace CyclonApp.Repositories.Repositories
   <div class=""section"">
     <div class=""section-title"">Summary</div>
     <div class=""summary-box"">{report.Summary}</div>
+  </div>
+
+  <div class=""section"">
+    <div class=""section-title"">Conclusion</div>
+    <div style=""background:{(report.Conclusion.ReadyToProceed ? "#f0fdf4" : "#fef2f2")};border:1px solid {(report.Conclusion.ReadyToProceed ? "#bbf7d0" : "#fecaca")};border-radius:8px;padding:14px 16px;"">
+      <p style=""margin:0 0 {(report.Conclusion.PriorityActions.Count > 0 ? "10px" : "0")};font-size:12px;"">{report.Conclusion.Verdict}</p>
+      {(report.Conclusion.PriorityActions.Count > 0 ? $@"
+      <div style=""font-weight:700;font-size:11.5px;margin-bottom:4px;"">Priority actions, in order:</div>
+      <ol style=""margin:0;padding-left:18px;font-size:11.5px;"">
+        {string.Concat(report.Conclusion.PriorityActions.Select(a => $"<li style='margin-bottom:3px;'>{a}</li>"))}
+      </ol>" : "")}
+    </div>
   </div>
 
   <div class=""report-footer"">
@@ -405,6 +418,60 @@ namespace CyclonApp.Repositories.Repositories
                     : "No issues were detected.";
 
             return $"{overall} {physicsLine} {issueLine}";
+        }
+
+        /// <summary>
+        /// Builds the report's closing Conclusion: a short verdict paragraph
+        /// plus a prioritized, deduplicated action list — every Warning/
+        /// Critical issue's Recommendation, worst severity first, in the
+        /// order the engineer should actually work through them. This is
+        /// deliberately separate from the per-card Recommendation fields:
+        /// those answer "what do I do about THIS issue", this answers
+        /// "given everything on this page, what do I do first, overall".
+        /// </summary>
+        private ConclusionDto BuildConclusion(double score, List<EngineeringInsightDto> insights, PhysicsValidationDto physics)
+        {
+            var actionable = insights
+                .Where(i => i.Severity != InsightSeverity.Good)
+                .OrderByDescending(i => i.Severity)              // Critical (2) before Warning (1)
+                .Select(i => i.Recommendation)
+                .Where(r => !string.IsNullOrWhiteSpace(r))
+                .Distinct()
+                .ToList();
+
+            bool readyToProceed = physics.MassConservationPassed
+                && !insights.Any(i => i.Severity == InsightSeverity.Critical);
+
+            string verdict;
+            if (!physics.MassConservationPassed)
+            {
+                verdict = "Physics validation did not pass, so the numbers above are not yet trustworthy. " +
+                          "Resolve the simulation issue and re-run before using this result for design decisions.";
+            }
+            else if (readyToProceed && actionable.Count == 0)
+            {
+                verdict = $"This design is in good shape — health score {Math.Round(score, 0)}/100, " +
+                          "no critical or warning issues detected. It's ready to proceed as-is.";
+            }
+            else if (readyToProceed)
+            {
+                verdict = $"This design is workable as-is (health score {Math.Round(score, 0)}/100) but has " +
+                          "room to improve. None of the open items are blocking, so proceeding is reasonable " +
+                          "while the actions below are addressed in a future revision.";
+            }
+            else
+            {
+                verdict = $"This design has at least one critical issue (health score {Math.Round(score, 0)}/100) " +
+                          "and should not be finalized yet. Work through the priority actions below, then re-run " +
+                          "the field solve to confirm the fix before proceeding.";
+            }
+
+            return new ConclusionDto
+            {
+                Verdict = verdict,
+                PriorityActions = actionable,
+                ReadyToProceed = readyToProceed
+            };
         }
 
         private double ComputeConfidence(FieldResultDto result)

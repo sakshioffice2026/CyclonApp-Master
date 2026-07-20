@@ -43,5 +43,26 @@ namespace CyclonApp.Model.DTOs
         public List<EngineeringInsightDto> Insights { get; set; } = new();
         public List<RiskIndicatorDto> RiskIndicators { get; set; } = new();
         public string Summary { get; set; } = string.Empty;
+
+        /// <summary>Closing verdict for the whole report — distinct from the
+        /// per-issue Recommendation fields above. Answers "given everything
+        /// on this page, what should I actually do next, in order?"</summary>
+        public ConclusionDto Conclusion { get; set; } = new();
+    }
+
+    public class ConclusionDto
+    {
+        /// <summary>One short paragraph: overall verdict + whether the
+        /// results here can be trusted as-is.</summary>
+        public string Verdict { get; set; } = string.Empty;
+
+        /// <summary>Deduplicated recommendations from every Warning/Critical
+        /// issue, worst severity first, in the order they should be acted
+        /// on. Empty when there's nothing to act on (all-Good report).</summary>
+        public List<string> PriorityActions { get; set; } = new();
+
+        /// <summary>Whether this design/result is ready to move forward on
+        /// as-is (no Critical issues and physics validation passed).</summary>
+        public bool ReadyToProceed { get; set; }
     }
 }

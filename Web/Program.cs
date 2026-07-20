@@ -52,6 +52,15 @@ builder.Services
     {
         options.JsonSerializerOptions.PropertyNamingPolicy =
             JsonNamingPolicy.CamelCase;
+        // Root-cause fix: InsightSeverity (Good/Warning/Critical) was being
+        // sent as its raw int (0/1/2). _EngineeringInsights.cshtml's JS
+        // compares item.severity === "Critical"/"Warning" as strings, so
+        // that comparison always failed and every insight card silently
+        // rendered with the "Good" (green check) styling regardless of its
+        // real severity — the text said "Critical" but the icon/color said
+        // "fine". Serializing enums by name fixes the mismatch.
+        options.JsonSerializerOptions.Converters.Add(
+            new System.Text.Json.Serialization.JsonStringEnumConverter());
     });
 var app = builder.Build();
 

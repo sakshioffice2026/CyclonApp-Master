@@ -75,6 +75,7 @@ from field_turbulence import (
     hydraulic_diameter_rect_m,
 )
 from field_boundary_conditions import assemble_bc_losses
+from sanity_check import mass_conservation_metrics
 
 # ─────────────────────────────────────────────────────────────────────────
 # Loss term weights. PDE residuals, BC residuals, and now the k/epsilon
@@ -667,15 +668,31 @@ def run_field_prediction_job(
 
     grid = evaluate_grid(model, scaler, geometry)
 
+    q_design = float(v_z_inlet) * math.pi * (
+        geometry.r_barrel ** 2 - geometry.r_exhaust ** 2
+    )
+
+    # Root-cause fix: massConservationStatus/massFlowSpread/finalLoss were
+    # defined on both the Python and .NET DTOs (FieldResultDto) but never
+    # actually computed or populated here, so app.py always sent them as
+    # null/None and EngineeringInsightRepository.EvaluateMassConservation
+    # on the .NET side treated every job as "failed" regardless of solve
+    # quality. sanity_check.mass_conservation_metrics already had the exact
+    # math (Q(z) spread across the barrel mid-section) — it just wasn't
+    # wired into the live /predict_field job path. Attaching it to `grid`
+    # (rather than adding new top-level dict keys) means app.py's existing
+    # `grid = result["grid"]` line picks it up with no extra plumbing.
+    mc = mass_conservation_metrics(grid, q_design=q_design)
+    grid["mass_conservation_status"] = mc["status"]
+    grid["mass_flow_spread"] = mc["rel_spread"]
+
     return {
         "geometry": geometry,
         "rho": rho,
         "nu": nu,
         "v_inlet": v_inlet,
         "v_z_inlet": v_z_inlet,
-        "q_design": float(v_z_inlet) * math.pi * (
-            geometry.r_barrel ** 2 - geometry.r_exhaust ** 2
-        ),
+        "q_design": q_design,
         "k_inlet": k_inlet,
         "eps_inlet": eps_inlet,
         "model": model,

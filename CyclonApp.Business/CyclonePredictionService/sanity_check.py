@@ -209,27 +209,27 @@ def check_wall_and_axis(grid: dict, v_inlet: float) -> bool:
 	return ok
 
 
-def check_mass_conservation(grid: dict, q_design: float | None = None) -> bool:
-	"""Computes Q(z) = integral of v_z * 2*pi*r dr at each z cross-section
-	(trapezoidal rule over the sorted r values present at that z) and
-	checks Q(z) stays reasonably consistent across sections. This is
-	stronger evidence of a physically valid solution than the training
-	loss alone — it checks continuity is satisfied in aggregate, not just
-	that the pointwise PDE residual was small at the collocation points
-	used during training.
+def mass_conservation_metrics(grid: dict, q_design: float | None = None) -> dict:
+	"""Silent, structured version of the Q(z) mass-conservation check —
+	same math as check_mass_conservation below, but returns a dict instead
+	of printing, so callers that need the number (not just a console line)
+	can use it. field_train.run_field_prediction_job calls this to attach
+	massConservationStatus/massFlowSpread to the job result; sanity_check's
+	own check_mass_conservation (CLI/PASS-FAIL reporting) now delegates
+	here too, so the two can never drift apart.
 
-	q_design: optional design volumetric flow (m^3/s). When provided (or
-	recoverable from the JSON), relative spread is measured against this
-	stable scale rather than mean(Q). That matters for reverse-flow
-	cyclones, where the physically correct mid-plane net Q is ~0 — dividing
-	by mean(Q) then false-fails even a good solution.
+	Returns:
+		{"status": "ok" | "warning" | "failed" | "unknown",
+		 "rel_spread": float | None,
+		 "detail": str}
+		"unknown" means too few z-levels/cross-sections to judge either way
+		(not a pass or a fail — just not enough data).
 	"""
 	import math
 	groups = _group_by_z(grid)
 	z_values = sorted(groups.keys())
 	if len(z_values) < 3:
-		report("Mass conservation", "WARN", "too few z-levels to check")
-		return True
+		return {"status": "unknown", "rel_spread": None, "detail": "too few z-levels to check"}
 
 	flows = []
 	for z in z_values:
@@ -247,8 +247,8 @@ def check_mass_conservation(grid: dict, q_design: float | None = None) -> bool:
 		flows.append((z, q))
 
 	if len(flows) < 3:
-		report("Mass conservation", "WARN", "too few valid cross-sections to check")
-		return True
+		return {"status": "unknown", "rel_spread": None, "detail": "too few valid cross-sections to check"}
+
 	# Skip the first/last few z-levels — inlet/outlet regions have real
 	# inflow/outflow so Q(z) is EXPECTED to change there; the barrel's
 	# mid-section (away from inlet and outlets) is where Q(z) should be
@@ -256,10 +256,6 @@ def check_mass_conservation(grid: dict, q_design: float | None = None) -> bool:
 	mid = flows[len(flows) // 4 : 3 * len(flows) // 4]
 	if len(mid) < 2:
 		mid = flows
-
-	print("\nQ(z):")
-	for z, q in flows:
-		print(f"{z:.4f}  {q:.6f}")
 
 	q_values = [q for _, q in mid]
 	q_mean = sum(q_values) / len(q_values)
@@ -281,27 +277,27 @@ def check_mass_conservation(grid: dict, q_design: float | None = None) -> bool:
 	level_frac = abs(q_mean) / max(design_abs, q_floor)
 
 	if rel_spread > 0.5:
-		report(
-			"Mass conservation",
-			"FAIL",
-			f"volumetric flow Q(z) varies by {rel_spread:.1%} of "
-			f"characteristic scale {q_char:.4f} m^3/s across the barrel "
-			f"mid-section (mean {q_mean:.4f} m^3/s) — continuity not well "
-			f"satisfied in aggregate",
-		)
-		return False
-
+		return {
+			"status": "failed",
+			"rel_spread": rel_spread,
+			"detail": (
+				f"volumetric flow Q(z) varies by {rel_spread:.1%} of "
+				f"characteristic scale {q_char:.4f} m^3/s across the barrel "
+				f"mid-section (mean {q_mean:.4f} m^3/s) — continuity not well "
+				f"satisfied in aggregate"
+			),
+		}
 	elif rel_spread > 0.2:
-		report(
-			"Mass conservation",
-			"WARN",
-			f"Q(z) varies by {rel_spread:.1%} of characteristic scale "
-			f"{q_char:.4f} m^3/s across the barrel mid-section "
-			f"(mean {q_mean:.4f} m^3/s) — some inconsistency, may improve "
-			f"with more training",
-		)
-		return True
-
+		return {
+			"status": "warning",
+			"rel_spread": rel_spread,
+			"detail": (
+				f"Q(z) varies by {rel_spread:.1%} of characteristic scale "
+				f"{q_char:.4f} m^3/s across the barrel mid-section "
+				f"(mean {q_mean:.4f} m^3/s) — some inconsistency, may improve "
+				f"with more training"
+			),
+		}
 	else:
 		extra = ""
 		if level_frac > 0.5:
@@ -309,15 +305,50 @@ def check_mass_conservation(grid: dict, q_design: float | None = None) -> bool:
 				f" Note: |mean Q| is {level_frac:.0%} of scale — large "
 				f"net through-flow; reverse-flow exhaust may be weak."
 			)
-		report(
-			"Mass conservation",
-			"PASS",
-			f"Q(z) varies by only {rel_spread:.1%} of characteristic scale "
-			f"{q_char:.4f} m^3/s across the barrel mid-section "
-			f"(mean {q_mean:.4f} m^3/s) — continuity well satisfied in "
-			f"aggregate.{extra}",
-		)
+		return {
+			"status": "ok",
+			"rel_spread": rel_spread,
+			"detail": (
+				f"Q(z) varies by only {rel_spread:.1%} of characteristic scale "
+				f"{q_char:.4f} m^3/s across the barrel mid-section "
+				f"(mean {q_mean:.4f} m^3/s) — continuity well satisfied in "
+				f"aggregate.{extra}"
+			),
+		}
+
+
+def check_mass_conservation(grid: dict, q_design: float | None = None) -> bool:
+	"""Computes Q(z) = integral of v_z * 2*pi*r dr at each z cross-section
+	(trapezoidal rule over the sorted r values present at that z) and
+	checks Q(z) stays reasonably consistent across sections. This is
+	stronger evidence of a physically valid solution than the training
+	loss alone — it checks continuity is satisfied in aggregate, not just
+	that the pointwise PDE residual was small at the collocation points
+	used during training.
+
+	q_design: optional design volumetric flow (m^3/s). When provided (or
+	recoverable from the JSON), relative spread is measured against this
+	stable scale rather than mean(Q). That matters for reverse-flow
+	cyclones, where the physically correct mid-plane net Q is ~0 — dividing
+	by mean(Q) then false-fails even a good solution.
+
+	Thin PASS/WARN/FAIL-printing wrapper around mass_conservation_metrics —
+	see that function for the actual computation.
+	"""
+	groups = _group_by_z(grid)
+	z_values = sorted(groups.keys())
+	metrics = mass_conservation_metrics(grid, q_design=q_design)
+
+	if metrics["status"] == "unknown":
+		report("Mass conservation", "WARN", metrics["detail"])
 		return True
+
+	if len(z_values) >= 3:
+		print("\nQ(z) mid-section relative spread computed — see detail below.")
+
+	status_map = {"failed": "FAIL", "warning": "WARN", "ok": "PASS"}
+	report("Mass conservation", status_map[metrics["status"]], metrics["detail"])
+	return metrics["status"] != "failed"
 def main():
 	p = argparse.ArgumentParser(description=__doc__)
 	p.add_argument("json_path", help="Path to the field_train.py --output-json result")
