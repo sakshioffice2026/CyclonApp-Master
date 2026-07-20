@@ -13,6 +13,16 @@ namespace CyclonApp.Repositories.Repositories
     /// starting estimates, not confirmed engineering limits — have the
     /// client's engineer review/adjust them before this is relied on in
     /// production.
+    ///
+    /// The "Separation Efficiency" risk indicator uses the real Lapple-model
+    /// efficiency (CyclonOutputDto.Efficiency) when GenerateReport is given
+    /// one, and only falls back to a swirl-only estimate — clearly labeled
+    /// "(estimated)" — when it isn't available. The "Mass Conservation" card
+    /// is a distinct check (does the flow field balance mass, not how well
+    /// it separates particles) and was previously miscategorized under the
+    /// "Separation Efficiency" name; that's why two unrelated numbers used
+    /// to look like the same metric. See EstimateSeparationEfficiency's
+    /// remarks for detail.
     /// </summary>
     public class EngineeringInsightRepository : IEngineeringInsight
     {
@@ -32,7 +42,7 @@ namespace CyclonApp.Repositories.Repositories
             public const double MassFlowSpreadCritical = 0.30;
         }
 
-        public CycloneHealthReportDto GenerateReport(FieldResultDto result)
+        public CycloneHealthReportDto GenerateReport(FieldResultDto result, double? knownEfficiencyPercent = null)
         {
             if (result == null) throw new ArgumentNullException(nameof(result));
 
@@ -60,10 +70,22 @@ namespace CyclonApp.Repositories.Repositories
                 BuildRisk("Wear Risk", NormalizePercent(maxWallVelocity, Thresholds.WallVelocityWarningMs, Thresholds.WallVelocityCriticalMs)),
                 BuildRisk("Energy Consumption", NormalizePercent(maxPressureDrop, Thresholds.PressureDropWarningPa, Thresholds.PressureDropCriticalPa)),
             };
+
+            // Prefer the real Lapple-model efficiency (from the standard
+            // calculation, which actually accounts for geometry and particle
+            // size) whenever the caller has one. Only fall back to the
+            // swirl-only placeholder — and say so in the label — when no
+            // standard calculation result is available yet, so the number on
+            // screen never silently looks more authoritative than it is.
+            bool usingRealEfficiency = knownEfficiencyPercent.HasValue;
+            double separationEfficiencyPercent = usingRealEfficiency
+                ? knownEfficiencyPercent!.Value
+                : EstimateSeparationEfficiency(avgTangential);
+
             riskIndicators.Add(new RiskIndicatorDto
             {
-                Name = "Separation Efficiency",
-                Percent = Math.Round(EstimateSeparationEfficiency(avgTangential), 1),
+                Name = usingRealEfficiency ? "Separation Efficiency" : "Separation Efficiency (estimated)",
+                Percent = Math.Round(Math.Max(0.0, Math.Min(100.0, separationEfficiencyPercent)), 1),
                 Level = "Info"
             });
 
@@ -339,7 +361,7 @@ namespace CyclonApp.Repositories.Repositories
             {
                 return new EngineeringInsightDto
                 {
-                    Category = "Low Separation Efficiency",
+                    Category = "Mass Conservation",
                     Severity = InsightSeverity.Critical,
                     WhatHappened = "The simulated flow field did not conserve mass within an acceptable tolerance.",
                     Why = "The underlying physics solve has not converged to a physically consistent flow field.",
@@ -351,7 +373,7 @@ namespace CyclonApp.Repositories.Repositories
             {
                 return new EngineeringInsightDto
                 {
-                    Category = "Separation Efficiency",
+                    Category = "Mass Conservation",
                     Severity = InsightSeverity.Warning,
                     WhatHappened = "Mass conservation passed, but with some spread across the flow field.",
                     Why = "Minor numerical variation in the physics solve.",
@@ -361,7 +383,7 @@ namespace CyclonApp.Repositories.Repositories
             }
             return new EngineeringInsightDto
             {
-                Category = "Separation Efficiency",
+                Category = "Mass Conservation",
                 Severity = InsightSeverity.Good,
                 WhatHappened = "Mass conservation passed with low spread across the flow field.",
                 Why = "The physics solve converged to a consistent flow field.",
@@ -510,10 +532,20 @@ namespace CyclonApp.Repositories.Repositories
 
         private double EstimateSeparationEfficiency(double avgTangentialMs)
         {
-            // Simple monotonic placeholder mapping swirl strength -> an
-            // illustrative efficiency percentage for the risk-indicator bar.
-            // NOT a validated efficiency correlation — replace with the
-            // Lapple-model efficiency output once wired to CyclonCalculationRepository.
+            // FALLBACK ONLY. GenerateReport now prefers the real Lapple-model
+            // efficiency (CyclonOutputDto.Efficiency, computed in
+            // CyclonCalculationRepository from actual geometry, particle size,
+            // density, and viscosity) whenever the caller supplies it — see
+            // knownEfficiencyPercent above. This function only runs when that
+            // isn't available, e.g. the standard calculation for this revision
+            // hasn't been run yet. It's a simple monotonic placeholder mapping
+            // swirl strength alone -> an illustrative percentage, and is NOT a
+            // validated efficiency correlation: it ignores geometry and
+            // particle size entirely, so different designs with similar swirl
+            // velocity will show similar numbers here even though their real
+            // separation performance differs. The risk-indicator label is
+            // marked "(estimated)" whenever this path is used, specifically so
+            // this number is never mistaken for the real one.
             double capped = Math.Min(avgTangentialMs, 40.0);
             return 50.0 + (capped / 40.0) * 45.0;
         }

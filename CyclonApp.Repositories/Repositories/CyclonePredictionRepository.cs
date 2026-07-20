@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -14,6 +15,20 @@ namespace CyclonApp.Repositories.Repositories
     {
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly string _baseUrl;
+
+        // jobId -> real Lapple-model efficiency (%), set by StartFieldPredictionAsync
+        // when the caller has one. Deliberately a `static` field rather than an
+        // instance field: this repository is registered AddScoped (see
+        // Program.cs), so a new instance is created per HTTP request — a static
+        // dictionary is what lets a value stashed on the "start job" request
+        // still be readable on the later "poll status" / "download report"
+        // requests. Mirrors the same in-memory-with-TTL pattern the Python
+        // service already uses for job storage (see app.py), so no extra
+        // persistence layer is introduced here. Capped and opportunistically
+        // trimmed so a long-running process doesn't grow this unbounded if
+        // jobs are started far more often than their results are ever read.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, double> _knownEfficiencyByJobId = new();
+        private const int MaxCachedEfficiencyEntries = 2000;
 
         // PostAsJsonAsync, when called with no explicit JsonSerializerOptions,
         // defaults to JsonSerializerDefaults.Web — which camelCases property
@@ -46,7 +61,7 @@ namespace CyclonApp.Repositories.Repositories
         // ever 422/404. Field-solving (/predict_field/*) below is the only
         // prediction contract this service still serves.
 
-        public async Task<string> StartFieldPredictionAsync(DesignRevision input, CyclonDimensions dimensions)
+        public async Task<string> StartFieldPredictionAsync(DesignRevision input, CyclonDimensions dimensions, double? knownEfficiencyPercent = null)
         {
             var client = _httpClientFactory.CreateClient("CyclonePrediction");
             client.BaseAddress = new Uri(_baseUrl);
@@ -97,7 +112,28 @@ namespace CyclonApp.Repositories.Repositories
             var result = await response.Content.ReadFromJsonAsync<PredictFieldStartResponse>()
                          ?? throw new Exception("Field prediction service returned an empty start response.");
 
+            if (knownEfficiencyPercent.HasValue)
+            {
+                if (_knownEfficiencyByJobId.Count >= MaxCachedEfficiencyEntries)
+                {
+                    // Best-effort trim, not a strict LRU — good enough to bound
+                    // memory without adding a background sweep for what's
+                    // already a short-lived, TTL-bounded set of job ids.
+                    foreach (var staleKey in _knownEfficiencyByJobId.Keys.Take(MaxCachedEfficiencyEntries / 4))
+                    {
+                        _knownEfficiencyByJobId.TryRemove(staleKey, out _);
+                    }
+                }
+
+                _knownEfficiencyByJobId[result.JobId] = knownEfficiencyPercent.Value;
+            }
+
             return result.JobId;
+        }
+
+        public double? GetKnownEfficiencyPercent(string jobId)
+        {
+            return _knownEfficiencyByJobId.TryGetValue(jobId, out var value) ? value : null;
         }
 
         public async Task<FieldPredictionStatusDto?> GetFieldPredictionStatusAsync(string jobId)

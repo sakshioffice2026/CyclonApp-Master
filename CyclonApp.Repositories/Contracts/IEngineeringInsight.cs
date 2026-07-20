@@ -4,7 +4,15 @@ namespace CyclonApp.Repositories.Contracts
 {
     public interface IEngineeringInsight
     {
-        CycloneHealthReportDto GenerateReport(FieldResultDto result);
+        /// <summary>
+        /// <paramref name="knownEfficiencyPercent"/>: the real Lapple-model
+        /// collection efficiency for this revision (CyclonOutputDto.Efficiency),
+        /// if the caller has one. When supplied, the "Separation Efficiency"
+        /// risk indicator reports this real figure instead of the field-solve's
+        /// swirl-based placeholder estimate — see EstimateSeparationEfficiency's
+        /// remarks for why that placeholder is not a substitute for it.
+        /// </summary>
+        CycloneHealthReportDto GenerateReport(FieldResultDto result, double? knownEfficiencyPercent = null);
 
         /// <summary>Renders a standalone, styled HTML document for a
         /// already-generated report — same "HTML served as the PDF

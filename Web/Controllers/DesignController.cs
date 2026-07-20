@@ -612,7 +612,7 @@ public class DesignController : Controller
                 return BadRequest(new { error = "Run the standard calculation for this revision first — no geometry available yet." });
             }
 
-            var jobId = await _predictionRepository.StartFieldPredictionAsync(revision, dims);
+            var jobId = await _predictionRepository.StartFieldPredictionAsync(revision, dims, output?.Efficiency);
 
             _logger.LogInformation("Field prediction job {JobId} started for Revision {RevId}.", jobId, id);
 
@@ -659,7 +659,8 @@ public class DesignController : Controller
             {
                 try
                 {
-                    status.Insights = _engineeringInsight.GenerateReport(status.Result);
+                    var knownEfficiency = _predictionRepository.GetKnownEfficiencyPercent(jobId);
+                    status.Insights = _engineeringInsight.GenerateReport(status.Result, knownEfficiency);
                 }
                 catch (Exception ex)
                 {
@@ -704,7 +705,8 @@ public class DesignController : Controller
                     "text/html", System.Text.Encoding.UTF8);
             }
 
-            var report = _engineeringInsight.GenerateReport(status.Result);
+            var knownEfficiency = _predictionRepository.GetKnownEfficiencyPercent(jobId);
+            var report = _engineeringInsight.GenerateReport(status.Result, knownEfficiency);
             var html = _engineeringInsight.BuildReportHtml(report, tagNumber, revisionNumber, projectName);
 
             // Returns HTML in browser — user can File > Print > Save as PDF,
