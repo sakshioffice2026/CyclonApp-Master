@@ -853,9 +853,9 @@ def run_field_prediction_job(
 LAPPLE_RATIOS: dict[str, float] = {
     "InletHeightRatio": 0.50,
     "InletWidthRatio": 0.25,
-    "BarrelHeightRatio": 1.50,
-    "ConeHeightRatio": 2.50,
-    "OutletDiamRatio": 0.50,   # exhaust (vortex finder) diameter
+    "BarrelHeightRatio": 2.00,   # was 1.50 — wrong
+    "ConeHeightRatio": 2.00,     # was 2.50 — wrong
+    "OutletDiamRatio": 0.50,
     "BottomOutletRatio": 0.25,
     "ExhaustLengthRatio": 0.625,
 }
