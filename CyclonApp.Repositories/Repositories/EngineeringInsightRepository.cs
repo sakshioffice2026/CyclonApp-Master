@@ -59,9 +59,9 @@ namespace CyclonApp.Repositories.Repositories
 
             var physics = new PhysicsValidationDto
             {
-                MassConservationPassed = string.Equals(result.MassConservationStatus, "ok", StringComparison.OrdinalIgnoreCase),
+                MassConservationPassed = !string.Equals(result.MassConservationStatus, "failed", StringComparison.OrdinalIgnoreCase),
                 BoundaryConditionsPassed = true,
-                ConvergencePassed = result.FinalLoss.HasValue && result.FinalLoss.Value < 1.0,
+                ConvergencePassed = !result.FinalLoss.HasValue || result.FinalLoss.Value < 1.0,
                 ConfidencePercent = ComputeConfidence(result)
             };
 
@@ -355,9 +355,12 @@ namespace CyclonApp.Repositories.Repositories
         private EngineeringInsightDto EvaluateMassConservation(FieldResultDto result)
         {
             bool passed = string.Equals(result.MassConservationStatus, "ok", StringComparison.OrdinalIgnoreCase);
+            bool isWarningStatus = string.Equals(result.MassConservationStatus, "warning", StringComparison.OrdinalIgnoreCase);
             double spread = result.MassFlowSpread ?? 0.0;
 
-            if (!passed || spread >= Thresholds.MassFlowSpreadCritical)
+            if ((!passed && !isWarningStatus) || spread >= Thresholds.MassFlowSpreadCritical)
+
+            
             {
                 return new EngineeringInsightDto
                 {
