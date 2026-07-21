@@ -90,7 +90,7 @@ SEED = 0
 PROGRESS_EVERY = 25
 
 # "cuda" if you turned on a Colab GPU runtime, else "cpu".
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = "cuda"
 
 # Saves an intermediate checkpoint every this-many epochs (in addition to
 # the final save at the end) so a Colab disconnect loses at most this many

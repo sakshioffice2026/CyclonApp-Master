@@ -1134,9 +1134,9 @@ def train_parametric_field_model(
             width_m=dims_mm["inlet_width_mm"] * 1e-3,
         )
         k_inlet_t, eps_inlet_t = inlet_turbulence_quantities(
-            v_inlet=torch.tensor([v_inlet]),
-            hydraulic_diameter_m=torch.tensor([hydraulic_diameter_m]),
-            nu=torch.tensor([nu]),
+            v_inlet=torch.tensor([v_inlet], device=device),
+            hydraulic_diameter_m=torch.tensor([hydraulic_diameter_m], device=device),
+            nu=torch.tensor([nu], device=device),
         )
 
         q_design = float(v_z_inlet) * math.pi * (
