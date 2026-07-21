@@ -1,28 +1,33 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk.Web">
 
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-  </PropertyGroup>
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+	</PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="8.0.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Identity.UI" Version="8.0.0" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.0" />
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="8.0.0">
-      <PrivateAssets>all</PrivateAssets>
-      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-    </PackageReference>
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.27.1" />
-    <PackageReference Include="Pomelo.EntityFrameworkCore.MySql" Version="8.0.0" />
-  </ItemGroup>
+	<ItemGroup>
+		<PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="8.0.0" />
+		<PackageReference Include="Microsoft.AspNetCore.Identity.UI" Version="8.0.0" />
+		<PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.0" />
+		<PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="8.0.0">
+			<PrivateAssets>all</PrivateAssets>
+			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+		</PackageReference>
+		<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.27.1" />
+		<PackageReference Include="Pomelo.EntityFrameworkCore.MySql" Version="8.0.0" />
+	</ItemGroup>
 
-  <ItemGroup>
-    <ProjectReference Include="..\CyclonApp.Database\CyclonApp.Database.csproj" />
-    <ProjectReference Include="..\CyclonApp.Model\CyclonApp.Model.csproj" />
-    <ProjectReference Include="..\CyclonApp.Repositories\CyclonApp.Repositories.csproj" />
-    <ProjectReference Include="..\CyclonApp.Utilities\CyclonApp.Utilities.csproj" />
-  </ItemGroup>
+	<ItemGroup>
+		<None Include="Models\cyclone_model.onnx" CopyToOutputDirectory="PreserveNewest" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\CyclonApp.Business\CyclonApp.Business.csproj" />
+		<ProjectReference Include="..\CyclonApp.Database\CyclonApp.Database.csproj" />
+		<ProjectReference Include="..\CyclonApp.Model\CyclonApp.Model.csproj" />
+		<ProjectReference Include="..\CyclonApp.Repositories\CyclonApp.Repositories.csproj" />
+		<ProjectReference Include="..\CyclonApp.Utilities\CyclonApp.Utilities.csproj" />
+	</ItemGroup>
 
 </Project>

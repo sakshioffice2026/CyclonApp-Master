@@ -73,7 +73,7 @@ import torch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
 
-from field_model import evaluate_grid
+from field_model import evaluate_grid, CycloneFieldPINN, FieldScaler
 from field_train import run_field_prediction_job, load_parametric_field_checkpoint
 from field_physics import (
     geometry_from_dimensions_mm,
@@ -135,9 +135,40 @@ def _load_field_checkpoint(path: str) -> dict:
     PRODUCTION INFERENCE MODE note above). Delegates to
     field_train.load_parametric_field_checkpoint so app.py and
     field_train.py's --resume-from share one implementation of the
-    checkpoint file format."""
-    loaded = load_parametric_field_checkpoint(path)
-    return {"model": loaded["model"], "scaler": loaded["scaler"]}
+    checkpoint file format.
+
+    FALLBACK: if the checkpoint on disk turns out to be a --mode single
+    (save_field_checkpoint) checkpoint instead — no "checkpoint_kind" key,
+    just model_state_dict/hidden/n_layers/scaler_state_dict plus the
+    fixed-geometry training constants — load it directly rather than
+    refusing to start. The network still takes diameter_m/flow_rate_cfm as
+    explicit inputs either way (see field_model.py), so it will still
+    produce an output for whatever the request asks for; it just means
+    this particular checkpoint was only ever trained at one geometry/flow
+    point, so requests far from that point are extrapolating, not
+    interpolating a learned family the way a true parametric checkpoint
+    would. Good enough to unblock serving; swap in a real --mode parametric
+    checkpoint when one exists.
+    """
+    try:
+        loaded = load_parametric_field_checkpoint(path)
+        return {"model": loaded["model"], "scaler": loaded["scaler"]}
+    except RuntimeError:
+        raw = torch.load(path, map_location="cpu", weights_only=False)
+        if "model_state_dict" not in raw or "scaler_state_dict" not in raw:
+            raise  # genuinely not a checkpoint we know how to read at all
+
+        print(f"[startup] WARNING: '{path}' is a single-geometry checkpoint "
+              f"(--mode single), not a parametric one. Loading it anyway as "
+              f"a fallback so the service can start — predictions away from "
+              f"this checkpoint's original training geometry/flow rate will "
+              f"extrapolate. Retrain with --mode parametric when possible.")
+
+        model = CycloneFieldPINN(hidden=raw["hidden"], n_layers=raw["n_layers"])
+        model.load_state_dict(raw["model_state_dict"])
+        model.eval()
+        scaler = FieldScaler.from_state_dict(raw["scaler_state_dict"])
+        return {"model": model, "scaler": scaler}
 
 
 @app.on_event("startup")

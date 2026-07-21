@@ -51,11 +51,16 @@ builder.Services.AddScoped<IEngineeringInsight, EngineeringInsightRepository>();
 builder.Services.AddSingleton<CycloneFieldOnnxPredictor>(sp =>
 {
     var env = sp.GetRequiredService<IWebHostEnvironment>();
+    var config = sp.GetRequiredService<IConfiguration>();
+
+    // Falls back to "cyclone_model.onnx" (resolved under Models/) if the
+    // config key is missing, but normally comes from
+    // CyclonePredictionService:OnnxModelPath in appsettings.json.
+    var configuredFileName = config["CyclonePredictionService:OnnxModelPath"]
+                              ?? "cyclone_model.onnx";
 
     return new CycloneFieldOnnxPredictor(
-        Path.Combine(env.ContentRootPath,
-                     "Models",
-                     "cyclone_model.onnx"));
+        Path.Combine(env.ContentRootPath, "Models", configuredFileName));
 });
 builder.Services
     .AddControllersWithViews()

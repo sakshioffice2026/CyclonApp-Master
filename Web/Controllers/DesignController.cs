@@ -5,8 +5,10 @@ using CyclonApp.Database;
 using CyclonApp.Model.DTOs;
 using CyclonApp.Model.ViewModel;
 using CyclonApp.Repositories.Contracts;
+using CyclonApp.Business.CyclonePrediction;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+
 
 namespace CyclonApp.Controllers;
 
@@ -20,6 +22,7 @@ public class DesignController : Controller
     private readonly ICyclonePrediction _predictionRepository;
     private readonly ILogger<DesignController> _logger;
     private readonly IEngineeringInsight _engineeringInsight;
+    private readonly CycloneFieldOnnxPredictor _onnxPredictor;
     public readonly IUnitOfWork _uow;
 
 
@@ -33,6 +36,7 @@ public class DesignController : Controller
     ICyclonCalculation calculationRepository,
     ICyclonePrediction predictionRepository,
     IEngineeringInsight engineeringInsight,
+    CycloneFieldOnnxPredictor onnxPredictor,
     ILogger<DesignController> logger,
     IUnitOfWork uow)
     {
@@ -42,6 +46,7 @@ public class DesignController : Controller
         _calculationRepository = calculationRepository;
         _predictionRepository = predictionRepository;
         _engineeringInsight = engineeringInsight;
+        _onnxPredictor = onnxPredictor;
         _logger = logger;
         _uow = uow;
     }
@@ -682,6 +687,73 @@ public class DesignController : Controller
 
             return StatusCode(StatusCodes.Status503ServiceUnavailable,
                 new { error = "The field prediction service is unavailable. Please try again shortly." });
+        }
+    }
+
+    // ── FIELD PREDICTION (ONNX, synchronous CPU preview) ─────────────────────
+    // Unlike StartFieldPrediction/FieldPredictionStatus above (which kick off
+    // a real multi-minute PINN training job on the Python service), this
+    // evaluates the already-trained cyclone_model.onnx checkpoint directly
+    // in-process via CycloneFieldOnnxPredictor — no job, no polling, result
+    // comes back in the same request. Intended as a fast preview using the
+    // frozen checkpoint; it does not retrain or fine-tune anything, so treat
+    // its output as an approximation for design exploration, not a
+    // replacement for a full field-solve job when a final answer is needed.
+    [HttpPost]
+    [ValidateAntiForgeryToken]
+    public async Task<IActionResult> FieldPredictionOnnxPreview(int id)
+    {
+        try
+        {
+            var revision = await _designRepository.GetRevisionWithDetailsAsync(id);
+            if (revision == null) return NotFound();
+
+            var output = string.IsNullOrEmpty(revision.EfficiencyJson)
+                ? null
+                : JsonSerializer.Deserialize<CyclonOutputDto>(revision.EfficiencyJson, _jsonOpts);
+            var dims = output?.Dimensions;
+            if (dims == null)
+            {
+                return BadRequest(new { error = "Run the standard calculation for this revision first — no geometry available yet." });
+            }
+
+            var grid = CycloneFieldGridBuilder.Build(
+                barrelDiameterM: dims.BarrelDiameterM,
+                barrelHeightM: dims.BarrelHeightMm / 1000.0,
+                coneHeightM: dims.ConeHeightMm / 1000.0,
+                bottomOutletM: dims.BottomOutletMm / 1000.0);
+
+            if (grid.R.Length == 0)
+            {
+                return Ok(new FieldResultDto());
+            }
+
+            var flowRateCfm = (float)revision.FlowRateCFM;
+            var diameterM = (float)dims.BarrelDiameterM;
+
+            var result = _onnxPredictor.Predict(grid.R, grid.Z, diameterM, flowRateCfm);
+
+            var dto = new FieldResultDto
+            {
+                RMeters = grid.R.Select(v => (double)v).ToList(),
+                ZMeters = grid.Z.Select(v => (double)v).ToList(),
+                VRMs = result.VR.Select(v => (double)v).ToList(),
+                VThetaMs = result.VTheta.Select(v => (double)v).ToList(),
+                VZMs = result.VZ.Select(v => (double)v).ToList(),
+                PressurePa = result.P.Select(v => (double)v).ToList(),
+            };
+
+            return Ok(dto);
+        }
+        catch (Exception ex)
+        {
+            _uow.exceptionHandlerRepository.SaveException(
+                "DesignController",
+                "FieldPredictionOnnxPreview",
+                ex.ToString());
+
+            return StatusCode(StatusCodes.Status500InternalServerError,
+                new { error = "The ONNX field preview failed. Check server logs." });
         }
     }
 
