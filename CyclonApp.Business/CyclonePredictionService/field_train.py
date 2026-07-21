@@ -1088,6 +1088,50 @@ def train_parametric_field_model(
     return model, template_scaler, history
 
 
+def save_parametric_field_checkpoint(
+    path: str,
+    model: "CycloneFieldPINN",
+    scaler: FieldScaler,
+    ratios: dict[str, float],
+    operating_temp_c: float,
+    operating_press_kpa: float,
+    gas_type: str,
+    hidden: int,
+    n_layers: int,
+) -> None:
+    """Saves a checkpoint for the PARAMETRIC training mode
+    (train_parametric_field_model) — distinct from save_field_checkpoint,
+    which is for train_field_model's single-fixed-geometry mode and
+    requires a single baked geometry/rho/nu/v_inlet/etc. that a parametric
+    model does not have (it covers a whole family of designs, not one).
+
+    `scaler` must be the FieldScaler returned by train_parametric_field_model
+    (the "template" scaler) — its D_min/D_max/Q_min/Q_max are the fixed
+    parametric normalization window the network was trained against; its
+    L/U/P/K/E are meaningless here and are NOT saved (app.py recomputes
+    them per-request via FieldScaler.with_scales for the request's actual
+    geometry — see app.py's _run_field_job).
+
+    ratios/operating_temp_c/operating_press_kpa/gas_type are saved so the
+    exact LAPPLE family and fluid assumptions this checkpoint was trained
+    under are recorded alongside the weights, not left to tribal knowledge.
+    """
+    torch.save(
+        {
+            "checkpoint_kind": "parametric",
+            "model_state_dict": model.state_dict(),
+            "hidden": hidden,
+            "n_layers": n_layers,
+            "scaler_state_dict": scaler.state_dict(),
+            "ratios": ratios,
+            "operating_temp_c": operating_temp_c,
+            "operating_press_kpa": operating_press_kpa,
+            "gas_type": gas_type,
+        },
+        path,
+    )
+
+
 def evaluate_parametric_interpolation(
     model: CycloneFieldPINN,
     scaler: FieldScaler,
@@ -1164,30 +1208,52 @@ def _build_arg_parser():
 
     p = argparse.ArgumentParser(
         description=(
-            "Train and evaluate a CycloneFieldPINN for one geometry/"
-            "operating point, offline — no HTTP service required. Prints a "
-            "summary and optionally writes the full grid result to JSON."
+            "Train a CycloneFieldPINN, offline — no HTTP service required. "
+            "--mode single (default) trains one fixed geometry/operating "
+            "point and evaluates a grid, matching what /predict_field/start "
+            "would produce for the same inputs. --mode parametric trains "
+            "ONE network across a whole LAPPLE diameter/flow-rate family via "
+            "domain randomization (see train_parametric_field_model) and "
+            "requires --save-checkpoint — this is the actual 'train in "
+            "Colab, deploy the checkpoint' step for app.py's production "
+            "inference mode."
         ),
     )
-    geo = p.add_argument_group("geometry (mm)")
-    geo.add_argument("--barrel-diameter-mm", type=float, required=True)
-    geo.add_argument("--barrel-height-mm", type=float, required=True)
-    geo.add_argument("--cone-height-mm", type=float, required=True)
-    geo.add_argument("--exhaust-dia-mm", type=float, required=True)
-    geo.add_argument("--exhaust-length-mm", type=float, required=True)
-    geo.add_argument("--bottom-outlet-mm", type=float, required=True)
-    geo.add_argument("--inlet-height-mm", type=float, required=True)
-    geo.add_argument("--inlet-width-mm", type=float, required=True)
+    p.add_argument("--mode", choices=["single", "parametric"], default="single")
+
+    geo = p.add_argument_group("geometry (mm) — required for --mode single only")
+    geo.add_argument("--barrel-diameter-mm", type=float, default=None)
+    geo.add_argument("--barrel-height-mm", type=float, default=None)
+    geo.add_argument("--cone-height-mm", type=float, default=None)
+    geo.add_argument("--exhaust-dia-mm", type=float, default=None)
+    geo.add_argument("--exhaust-length-mm", type=float, default=None)
+    geo.add_argument("--bottom-outlet-mm", type=float, default=None)
+    geo.add_argument("--inlet-height-mm", type=float, default=None)
+    geo.add_argument("--inlet-width-mm", type=float, default=None)
 
     proc = p.add_argument_group("process conditions")
-    proc.add_argument("--flow-rate-cfm", type=float, required=True)
+    proc.add_argument("--flow-rate-cfm", type=float, default=None,
+                       help="required for --mode single; ignored for "
+                            "--mode parametric (use --flow-min-cfm/--flow-max-cfm)")
     proc.add_argument("--operating-temp-c", type=float, default=25.0)
     proc.add_argument("--operating-press-kpa", type=float, default=101.325)
     proc.add_argument("--gas-type", type=str, default="Air")
 
+    param = p.add_argument_group("parametric range (mm/CFM) — --mode parametric only")
+    param.add_argument("--diameter-min-mm", type=float, default=150.0)
+    param.add_argument("--diameter-max-mm", type=float, default=750.0)
+    param.add_argument("--flow-min-cfm", type=float, default=300.0)
+    param.add_argument("--flow-max-cfm", type=float, default=13000.0)
+
     train = p.add_argument_group("training")
-    train.add_argument("--epochs-adam", type=int, default=3000)
-    train.add_argument("--epochs-lbfgs", type=int, default=300)
+    train.add_argument("--epochs-adam", type=int, default=3000,
+                        help="--mode single Adam epoch count")
+    train.add_argument("--epochs-lbfgs", type=int, default=300,
+                        help="--mode single L-BFGS step count (parametric mode never uses L-BFGS)")
+    train.add_argument("--epochs", type=int, default=20000,
+                        help="--mode parametric Adam step count — needs to be much "
+                             "larger than --epochs-adam since each step only sees "
+                             "one sampled geometry (see train_parametric_field_model)")
     train.add_argument("--n-interior", type=int, default=2048)
     train.add_argument("--hidden", type=int, default=64)
     train.add_argument("--n-layers", type=int, default=6)
@@ -1203,14 +1269,13 @@ def _build_arg_parser():
 
     out = p.add_argument_group("output")
     out.add_argument("--output-json", type=str, default=None,
-                      help="if set, write the full grid result + history to this path")
+                      help="--mode single only: write the full grid result + history to this path")
     out.add_argument("--save-checkpoint", type=str, default=None,
-                      help="if set, save a production inference checkpoint "
-                           "(model + scaler + geometry + fluid constants) to "
-                           "this path, e.g. cyclone_model.pth — this is the "
-                           "'train once, deploy the file' step; load it in "
-                           "app.py for inference-only serving with no "
-                           "training after deploy")
+                      help="if set, save a production inference checkpoint to this "
+                           "path, e.g. cyclone_model.pth — this is the 'train once, "
+                           "deploy the file' step; load it in app.py for "
+                           "inference-only serving with no training after deploy. "
+                           "REQUIRED for --mode parametric.")
 
     return p
 
@@ -1219,13 +1284,25 @@ def _cli_progress_printer(epoch: int, total: int, loss: float) -> None:
     print(f"[{epoch:>5}/{total}] loss={loss:.6e}")
 
 
-def main(argv: Optional[list] = None) -> None:
-    args = _build_arg_parser().parse_args(argv)
-
-    on_progress = None if args.quiet else _cli_progress_printer
+def _run_single_mode(args, parser, on_progress) -> None:
+    required = {
+        "barrel_diameter_mm": args.barrel_diameter_mm,
+        "barrel_height_mm": args.barrel_height_mm,
+        "cone_height_mm": args.cone_height_mm,
+        "exhaust_dia_mm": args.exhaust_dia_mm,
+        "exhaust_length_mm": args.exhaust_length_mm,
+        "bottom_outlet_mm": args.bottom_outlet_mm,
+        "inlet_height_mm": args.inlet_height_mm,
+        "inlet_width_mm": args.inlet_width_mm,
+        "flow_rate_cfm": args.flow_rate_cfm,
+    }
+    missing = [f"--{k.replace('_', '-')}-mm" if k != "flow_rate_cfm" else "--flow-rate-cfm"
+               for k, v in required.items() if v is None]
+    if missing:
+        parser.error(f"--mode single requires: {', '.join(missing)}")
 
     print(
-        f"Training field model: barrel_d={args.barrel_diameter_mm}mm, "
+        f"Training field model (single): barrel_d={args.barrel_diameter_mm}mm, "
         f"flow={args.flow_rate_cfm}CFM, gas={args.gas_type}, "
         f"epochs=({args.epochs_adam} Adam + {args.epochs_lbfgs} L-BFGS)"
     )
@@ -1288,7 +1365,73 @@ def main(argv: Optional[list] = None) -> None:
         print(f"Wrote grid result to {args.output_json}")
 
     if args.save_checkpoint:
-        print(f"Saved production inference checkpoint to {args.save_checkpoint}")
+        print(f"Saved single-geometry production inference checkpoint to {args.save_checkpoint}")
+
+
+def _run_parametric_mode(args, parser, on_progress) -> None:
+    if not args.save_checkpoint:
+        parser.error(
+            "--mode parametric requires --save-checkpoint — a parametric "
+            "training run only produces value once the checkpoint is saved "
+            "for app.py to load (there is no single grid/geometry to print, "
+            "unlike --mode single)."
+        )
+
+    print(
+        f"Training field model (parametric): "
+        f"diameter=[{args.diameter_min_mm}, {args.diameter_max_mm}]mm, "
+        f"flow=[{args.flow_min_cfm}, {args.flow_max_cfm}]CFM, gas={args.gas_type}, "
+        f"epochs={args.epochs} (Adam only, domain-randomized)"
+    )
+
+    model, scaler, history = train_parametric_field_model(
+        rho_fn=fluid_properties,
+        ratios=LAPPLE_RATIOS,
+        diameter_range_m=(args.diameter_min_mm * 1e-3, args.diameter_max_mm * 1e-3),
+        flow_rate_range_cfm=(args.flow_min_cfm, args.flow_max_cfm),
+        operating_temp_c=args.operating_temp_c,
+        operating_press_kpa=args.operating_press_kpa,
+        gas_type=args.gas_type,
+        epochs=args.epochs,
+        n_interior=args.n_interior,
+        hidden=args.hidden,
+        n_layers=args.n_layers,
+        lr_start=args.lr_adam_start,
+        lr_end=args.lr_adam_end,
+        grad_clip_norm=args.grad_clip_norm,
+        device=args.device,
+        seed=args.seed,
+        on_progress=on_progress,
+        progress_every=args.progress_every,
+    )
+
+    print("\n── Done ──────────────────────────────────────────────")
+    print(f"final_loss={history['final_loss']:.6e}  wall_time_s={history['wall_time_s']:.1f}")
+
+    save_parametric_field_checkpoint(
+        args.save_checkpoint,
+        model=model,
+        scaler=scaler,
+        ratios=LAPPLE_RATIOS,
+        operating_temp_c=args.operating_temp_c,
+        operating_press_kpa=args.operating_press_kpa,
+        gas_type=args.gas_type,
+        hidden=args.hidden,
+        n_layers=args.n_layers,
+    )
+    print(f"Saved parametric production inference checkpoint to {args.save_checkpoint}")
+
+
+def main(argv: Optional[list] = None) -> None:
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+
+    on_progress = None if args.quiet else _cli_progress_printer
+
+    if args.mode == "single":
+        _run_single_mode(args, parser, on_progress)
+    else:
+        _run_parametric_mode(args, parser, on_progress)
 
 
 if __name__ == "__main__":

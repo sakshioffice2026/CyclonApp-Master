@@ -75,6 +75,14 @@ from pydantic import BaseModel, Field, ConfigDict
 
 from field_model import CycloneFieldPINN, FieldScaler, evaluate_grid
 from field_train import run_field_prediction_job
+from field_physics import (
+    geometry_from_dimensions_mm,
+    fluid_properties,
+    gas_type_to_onehot,
+    inlet_velocity_ms,
+    inlet_axial_velocity_ms,
+)
+from field_turbulence import hydraulic_diameter_rect_m, inlet_turbulence_quantities
 from sanity_check import mass_conservation_metrics
 
 app = FastAPI(title="Cyclone Prediction Service (Physics-Informed)")
@@ -87,21 +95,28 @@ FIELD_JOB_SWEEP_INTERVAL_SECONDS = 300
 
 # ─────────────────────────────────────────────────────────────────────────
 # PRODUCTION INFERENCE MODE — train once (e.g. in Colab via
-# `python field_train.py ... --save-checkpoint cyclone_model.pth`), deploy
-# the checkpoint alongside this service, load it once at startup, and serve
-# every request from the already-trained weights. No training happens after
-# deploy: _run_field_job below calls evaluate_grid() on the loaded model
-# instead of run_field_prediction_job()'s train_field_model() call.
+# field_train.train_parametric_field_model, saved the same way
+# save_field_checkpoint does), deploy the checkpoint alongside this
+# service, load it once at startup, and serve every request from the
+# already-trained weights. No training happens after deploy.
 #
-# IMPORTANT — same caveat as field_train.py's checkpoint-save comment: this
-# checkpoint is trained for ONE fixed geometry/operating point (see
-# field_train.py module docstring — CycloneFieldPINN bakes geometry in as
-# constants, it does not take them as inputs). Every request is served from
-# that single trained design; incoming geometry/flow/gas fields on the
-# request are accepted (so the existing PredictFieldStartRequest/.NET
-# contract is unchanged) but do not change the result. A mismatch warning
-# is logged so this isn't a silent surprise if the UI is later used to vary
-# designs against a checkpoint trained for a different one.
+# ROOT-CAUSE FIX (this revision): CycloneFieldPINN takes diameter_m/
+# flow_rate_cfm as EXPLICIT network inputs, not baked-in constants (see
+# field_model.py module docstring) — the checkpoint loaded here is the
+# parametric model trained across a whole LAPPLE size/flow-rate family via
+# train_parametric_field_model, not a single-geometry model. Previously
+# _run_field_job ignored the incoming request and always evaluated
+# state["geometry"]/state["flow_rate_cfm"] (the network's last training
+# scale, kept around only for FieldScaler bookkeeping) — every request
+# returned the exact same field regardless of what geometry was asked for.
+# Fixed below: _run_field_job now builds geometry/fluid/inlet/turbulence
+# quantities from the REQUEST'S OWN fields (same glue
+# field_train.run_field_prediction_job uses) and evaluates the network at
+# the request's actual diameter_m/flow_rate_cfm. state["model"] supplies
+# the trained weights; state["scaler"].D_min/D_max/Q_min/Q_max supply the
+# fixed parametric normalization window the network was trained with
+# (must not be recomputed per request — see FieldScaler.with_scales
+# docstring); everything else in state is unused by the live path now.
 # ─────────────────────────────────────────────────────────────────────────
 FIELD_MODEL_CHECKPOINT_PATH = os.environ.get(
     "FIELD_MODEL_CHECKPOINT_PATH", "cyclone_model.pth"
@@ -111,23 +126,27 @@ _inference_state: Optional[dict] = None  # populated by _load_field_checkpoint()
 
 
 def _load_field_checkpoint(path: str) -> dict:
+    """Loads a checkpoint saved by field_train.save_parametric_field_checkpoint
+    (--mode parametric). Only model weights + the parametric FieldScaler
+    (D_min/D_max/Q_min/Q_max normalization window) are needed at serve time —
+    _run_field_job recomputes everything else (geometry, rho, nu, v_inlet,
+    turbulence quantities) per-request from the incoming
+    PredictFieldStartRequest, since those vary by request now (see
+    PRODUCTION INFERENCE MODE note above)."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    if ckpt.get("checkpoint_kind") != "parametric":
+        raise RuntimeError(
+            f"'{path}' is not a parametric checkpoint (missing/invalid "
+            f"checkpoint_kind). This service now requires a checkpoint "
+            f"produced by `python field_train.py --mode parametric "
+            f"--save-checkpoint ...` — a single-geometry checkpoint from "
+            f"the old --mode single path cannot serve varying requests."
+        )
     model = CycloneFieldPINN(hidden=ckpt["hidden"], n_layers=ckpt["n_layers"])
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
     scaler = FieldScaler.from_state_dict(ckpt["scaler_state_dict"])
-    return {
-        "model": model,
-        "scaler": scaler,
-        "geometry": ckpt["geometry"],
-        "rho": ckpt["rho"],
-        "nu": ckpt["nu"],
-        "v_inlet": ckpt["v_inlet"],
-        "v_z_inlet": ckpt["v_z_inlet"],
-        "k_inlet": ckpt["k_inlet"],
-        "eps_inlet": ckpt["eps_inlet"],
-        "flow_rate_cfm": ckpt["flow_rate_cfm"],
-    }
+    return {"model": model, "scaler": scaler}
 
 
 @app.on_event("startup")
@@ -220,40 +239,94 @@ FIELD_JOB_EPOCHS_ADAM = 5
 FIELD_JOB_EPOCHS_LBFGS = 2
 
 
-def _warn_if_request_differs_from_trained_design(req: PredictFieldStartRequest) -> None:
-    """The loaded checkpoint was trained for one fixed geometry/operating
-    point (see PRODUCTION INFERENCE MODE note above). This does not block
-    or alter the request — it only makes a design mismatch visible in logs
-    instead of silently returning results for a different design than the
-    one requested."""
-    geo = _inference_state["geometry"]
-    trained_r_barrel_mm = geo.r_barrel * 2000.0
-    if abs(trained_r_barrel_mm - req.barrel_diameter_mm) > 1e-3:
+def _warn_if_request_outside_trained_range(req: PredictFieldStartRequest) -> None:
+    """The parametric checkpoint was trained across a diameter/flow-rate
+    window (state["scaler"].D_min/D_max/Q_min/Q_max — see
+    train_parametric_field_model). A request inside that window is
+    interpolation, which the network was trained for; a request outside it
+    is extrapolation, which it was not — this does not block or alter the
+    request (429/422 are for auth/format errors, not this), it only makes
+    an out-of-range design visible in logs rather than silently trusting an
+    unvalidated network output."""
+    scaler = _inference_state["scaler"]
+    diameter_m = req.barrel_diameter_mm * 1e-3
+    if not (scaler.D_min <= diameter_m <= scaler.D_max):
         print(
             f"[predict_field] WARNING: request barrel_diameter_mm="
-            f"{req.barrel_diameter_mm} differs from the checkpoint's trained "
-            f"design ({trained_r_barrel_mm} mm). Serving the trained "
-            f"design's precomputed field regardless — this checkpoint does "
-            f"not retrain per request."
+            f"{req.barrel_diameter_mm} ({diameter_m} m) is outside the "
+            f"trained range [{scaler.D_min}, {scaler.D_max}] m — result is "
+            f"extrapolation, not validated interpolation."
+        )
+    if not (scaler.Q_min <= req.flow_rate_cfm <= scaler.Q_max):
+        print(
+            f"[predict_field] WARNING: request flow_rate_cfm="
+            f"{req.flow_rate_cfm} is outside the trained range "
+            f"[{scaler.Q_min}, {scaler.Q_max}] CFM — result is "
+            f"extrapolation, not validated interpolation."
         )
 
 
 def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
     global _field_jobs_running_count
     try:
-        _warn_if_request_differs_from_trained_design(req)
+        _warn_if_request_outside_trained_range(req)
 
-        # INFERENCE ONLY — no training here. Uses the model/scaler/geometry
-        # loaded once at startup from FIELD_MODEL_CHECKPOINT_PATH.
+        # INFERENCE ONLY — no training here. state["model"] supplies the
+        # trained weights; everything below this line is request-specific
+        # glue (same as field_train.run_field_prediction_job's geometry ->
+        # fluid properties -> inlet velocity -> inlet turbulence pipeline),
+        # so the network is actually queried at the design that was asked
+        # for, not the checkpoint's last-trained scale.
         state = _inference_state
-        grid = evaluate_grid(
-            state["model"], state["scaler"], state["geometry"],
-            diameter_m=2.0 * state["geometry"].r_barrel,
-            flow_rate_cfm=state["flow_rate_cfm"],
+
+        geometry = geometry_from_dimensions_mm(
+            barrel_diameter_mm=req.barrel_diameter_mm,
+            barrel_height_mm=req.barrel_height_mm,
+            cone_height_mm=req.cone_height_mm,
+            exhaust_dia_mm=req.exhaust_dia_mm,
+            exhaust_length_mm=req.exhaust_length_mm,
+            bottom_outlet_mm=req.bottom_outlet_mm,
         )
 
-        q_design = float(state["v_z_inlet"]) * math.pi * (
-            state["geometry"].r_barrel ** 2 - state["geometry"].r_exhaust ** 2
+        gas_onehot = torch.tensor([gas_type_to_onehot(req.gas_type)])
+        rho_t, nu_t = fluid_properties(
+            torch.tensor([req.operating_temp_c]),
+            torch.tensor([req.operating_press_kpa]),
+            gas_onehot,
+        )
+        rho, nu = rho_t.item(), nu_t.item()
+
+        v_inlet = inlet_velocity_ms(
+            torch.tensor([req.flow_rate_cfm]),
+            torch.tensor([req.inlet_height_mm * 1e-3]),
+            torch.tensor([req.inlet_width_mm * 1e-3]),
+        ).item()
+        v_z_inlet = inlet_axial_velocity_ms(
+            torch.tensor([req.flow_rate_cfm]),
+            r_barrel_m=geometry.r_barrel, r_exhaust_m=geometry.r_exhaust,
+        ).item()
+
+        # Physical (L/U/P/K/E) scale for THIS request's geometry/velocity;
+        # the parametric D/Q normalization window is carried over unchanged
+        # from the trained checkpoint (see FieldScaler.with_scales — it
+        # must stay fixed across every query, not just every training
+        # epoch, for D_norm/Q_norm to mean the same thing they meant during
+        # training).
+        eval_scaler = state["scaler"].with_scales(
+            length_scale_m=geometry.r_barrel,
+            velocity_scale_ms=max(v_inlet, 1e-6),
+            rho=rho,
+        )
+
+        diameter_m = req.barrel_diameter_mm * 1e-3
+        grid = evaluate_grid(
+            state["model"], eval_scaler, geometry,
+            diameter_m=diameter_m,
+            flow_rate_cfm=req.flow_rate_cfm,
+        )
+
+        q_design = float(v_z_inlet) * math.pi * (
+            geometry.r_barrel ** 2 - geometry.r_exhaust ** 2
         )
         mc = mass_conservation_metrics(grid, q_design=q_design)
         grid["mass_conservation_status"] = mc["status"]
@@ -263,7 +336,7 @@ def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
             r_m=grid["r_m"], z_m=grid["z_m"],
             v_r_ms=grid["v_r_ms"], v_theta_ms=grid["v_theta_ms"],
             v_z_ms=grid["v_z_ms"], pressure_pa=grid["pressure_pa"],
-            rho_kgm3=state["rho"], nu_m2s=state["nu"], v_inlet_ms=state["v_inlet"],
+            rho_kgm3=rho, nu_m2s=nu, v_inlet_ms=v_inlet,
             # Mass-conservation diagnostics — see run_field_prediction_job's
             # "Root-cause fix" comment. Previously always omitted (None on
             # the wire), which made the .NET Engineering Insights panel
