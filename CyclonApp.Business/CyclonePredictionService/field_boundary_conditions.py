@@ -131,6 +131,19 @@ def assemble_bc_losses(
     Samples fresh collocation points on each boundary and returns the mean-
     squared residual for every BC term, keyed by name, ready to be summed
     (with weights) into a total loss by the training loop.
+
+    DEVICE FIX (root-cause): v_inlet/v_z_inlet/k_inlet/eps_inlet may arrive
+    already as tensors (built by the caller, e.g. field_train.py's
+    inlet_turbulence_quantities call). The previous version only forced
+    `device` onto the *fallback* branch (`torch.full(..., device=device)`)
+    when the value was NOT already a tensor -- an already-a-tensor input
+    was trusted as-is and never coerced onto `device`. On CUDA runs that
+    let a stray CPU tensor reach `out["k"] - k_inlet` inside
+    inlet_ring_residual and crash with "Expected all tensors to be on the
+    same device, but found at least two devices, cuda:0 and cpu!". Every
+    branch below now explicitly calls `.to(device)` regardless of whether
+    the value came in as a tensor or a plain float, so this can't recur
+    for any of the four inlet quantities.
     """
     losses: dict[str, torch.Tensor] = {}
 
@@ -143,18 +156,27 @@ def assemble_bc_losses(
         losses[k] = (v ** 2).mean()
 
     r_i, z_i = geometry.sample_inlet_ring(n_inlet, device=device)
+
     v_inlet_pt = v_inlet if torch.is_tensor(v_inlet) else torch.full((n_inlet,), float(v_inlet), device=device)
+    v_inlet_pt = v_inlet_pt.to(device)
     if v_inlet_pt.numel() == 1:
         v_inlet_pt = v_inlet_pt.expand(n_inlet)
+
     v_z_inlet_pt = v_z_inlet if torch.is_tensor(v_z_inlet) else torch.full((n_inlet,), float(v_z_inlet), device=device)
+    v_z_inlet_pt = v_z_inlet_pt.to(device)
     if v_z_inlet_pt.numel() == 1:
         v_z_inlet_pt = v_z_inlet_pt.expand(n_inlet)
+
     k_inlet_pt = k_inlet if torch.is_tensor(k_inlet) else torch.full((n_inlet,), float(k_inlet), device=device)
+    k_inlet_pt = k_inlet_pt.to(device)
     if k_inlet_pt.numel() == 1:
         k_inlet_pt = k_inlet_pt.expand(n_inlet)
+
     eps_inlet_pt = eps_inlet if torch.is_tensor(eps_inlet) else torch.full((n_inlet,), float(eps_inlet), device=device)
+    eps_inlet_pt = eps_inlet_pt.to(device)
     if eps_inlet_pt.numel() == 1:
         eps_inlet_pt = eps_inlet_pt.expand(n_inlet)
+
     for k, v in inlet_ring_residual(model_fn, r_i, z_i, v_inlet_pt, v_z_inlet_pt, k_inlet_pt, eps_inlet_pt).items():
         losses[k] = (v ** 2).mean()
 
