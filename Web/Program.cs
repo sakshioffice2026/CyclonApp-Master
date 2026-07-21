@@ -1,10 +1,12 @@
-﻿using System.Text.Json;
+﻿using CyclonApp.Business.CyclonePrediction;
 using CyclonApp.Database;
 using CyclonApp.Repositories;
 using CyclonApp.Repositories.Contracts;
 using CyclonApp.Repositories.Repositories;
+using DocumentFormat.OpenXml.Office2016.Drawing.ChartDrawing;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.EntityFrameworkCore;
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -46,6 +48,15 @@ builder.Services.AddScoped<ExceptionHandlerRepository>();
 builder.Services.AddHttpClient("CyclonePrediction"); // name must match CreateClient("CyclonePrediction") in the repository
 builder.Services.AddScoped<ICyclonePrediction, CyclonePredictionRepository>();
 builder.Services.AddScoped<IEngineeringInsight, EngineeringInsightRepository>();
+builder.Services.AddSingleton<CycloneFieldOnnxPredictor>(sp =>
+{
+    var env = sp.GetRequiredService<IWebHostEnvironment>();
+
+    return new CycloneFieldOnnxPredictor(
+        Path.Combine(env.ContentRootPath,
+                     "Models",
+                     "cyclone_model.onnx"));
+});
 builder.Services
     .AddControllersWithViews()
     .AddJsonOptions(options =>
