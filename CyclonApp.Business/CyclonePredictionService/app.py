@@ -73,8 +73,8 @@ import torch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
 
-from field_model import CycloneFieldPINN, FieldScaler, evaluate_grid
-from field_train import run_field_prediction_job
+from field_model import evaluate_grid
+from field_train import run_field_prediction_job, load_parametric_field_checkpoint
 from field_physics import (
     geometry_from_dimensions_mm,
     fluid_properties,
@@ -132,21 +132,12 @@ def _load_field_checkpoint(path: str) -> dict:
     _run_field_job recomputes everything else (geometry, rho, nu, v_inlet,
     turbulence quantities) per-request from the incoming
     PredictFieldStartRequest, since those vary by request now (see
-    PRODUCTION INFERENCE MODE note above)."""
-    ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    if ckpt.get("checkpoint_kind") != "parametric":
-        raise RuntimeError(
-            f"'{path}' is not a parametric checkpoint (missing/invalid "
-            f"checkpoint_kind). This service now requires a checkpoint "
-            f"produced by `python field_train.py --mode parametric "
-            f"--save-checkpoint ...` — a single-geometry checkpoint from "
-            f"the old --mode single path cannot serve varying requests."
-        )
-    model = CycloneFieldPINN(hidden=ckpt["hidden"], n_layers=ckpt["n_layers"])
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-    scaler = FieldScaler.from_state_dict(ckpt["scaler_state_dict"])
-    return {"model": model, "scaler": scaler}
+    PRODUCTION INFERENCE MODE note above). Delegates to
+    field_train.load_parametric_field_checkpoint so app.py and
+    field_train.py's --resume-from share one implementation of the
+    checkpoint file format."""
+    loaded = load_parametric_field_checkpoint(path)
+    return {"model": loaded["model"], "scaler": loaded["scaler"]}
 
 
 @app.on_event("startup")

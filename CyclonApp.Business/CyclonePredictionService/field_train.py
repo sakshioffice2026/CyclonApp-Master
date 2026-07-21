@@ -927,6 +927,9 @@ def train_parametric_field_model(
     seed: Optional[int] = 0,
     on_progress: Optional[OnProgressFn] = None,
     progress_every: int = 100,
+    resume_from: Optional[str] = None,
+    checkpoint_every: Optional[int] = None,
+    checkpoint_path: Optional[str] = None,
 ) -> tuple[CycloneFieldPINN, FieldScaler, dict]:
     """
     Trains ONE CycloneFieldPINN across a whole family of LAPPLE cyclones
@@ -961,19 +964,48 @@ def train_parametric_field_model(
             sane LAPPLE size range for `ratios`, and should match (or be a
             subset of) the range you'll actually query at inference time —
             the network was never shown geometries outside this window and
-            has no guarantee of extrapolating correctly beyond it.
-        epochs: total Adam steps. Needs to be much larger than
+            has no guarantee of extrapolating correctly beyond it. IGNORED
+            if `resume_from` is set — see resume_from below.
+        epochs: total Adam steps FOR THIS CALL (not cumulative across
+            resumes — see resume_from). Needs to be much larger than
             train_field_model's epochs_adam, since each step only sees one
             (of infinitely many) sampled geometries — this is genuinely a
             harder learning problem than fitting one fixed field.
         n_interior: PDE collocation points sampled fresh every epoch for
             that epoch's geometry.
-        hidden, n_layers: CycloneFieldPINN architecture.
-        lr_start / lr_end: exponential LR decay bounds over `epochs`.
+        hidden, n_layers: CycloneFieldPINN architecture. IGNORED if
+            `resume_from` is set (the checkpoint's architecture wins, since
+            weights must match the loaded state_dict's shape).
+        lr_start / lr_end: exponential LR decay bounds over `epochs` for
+            THIS call — resuming restarts the decay schedule from lr_start
+            rather than picking up mid-schedule (simpler and safe: an Adam
+            optimizer's moment estimates are not preserved across resume
+            either, so there is no "true" mid-schedule LR to resume at).
         grad_clip_norm: max gradient norm per step.
         device: "cpu" or "cuda".
         seed: RNG seed for reproducible sampling + init; None to skip.
+            IGNORED if `resume_from` is set (model weights come from the
+            checkpoint, not a fresh seeded init).
         on_progress / progress_every: as in train_field_model.
+        resume_from: path to a parametric checkpoint (see
+            save_parametric_field_checkpoint) to continue training from,
+            instead of a fresh random init. The checkpoint's own
+            hidden/n_layers and D_min/D_max/Q_min/Q_max normalization
+            window are used (printed if they differ from what was passed
+            in) — the network's conditioning-input meaning must stay fixed
+            across a resume, the same way it must stay fixed across epochs
+            within one run (see FieldScaler.with_scales docstring). This is
+            what makes it safe to train in bounded chunks (e.g. across
+            multiple Colab sessions) instead of one all-or-nothing run.
+        checkpoint_every: if set (with checkpoint_path), saves an
+            intermediate parametric checkpoint every this-many epochs (and
+            once more at the final epoch) DURING training — so a Colab
+            disconnect loses at most checkpoint_every epochs of progress,
+            not the whole run. Requires checkpoint_path.
+        checkpoint_path: destination for the periodic saves above. The
+            caller (field_train.py's CLI) is still responsible for treating
+            its own final save as authoritative; this is a safety net
+            against losing progress mid-run, not a substitute for it.
 
     Returns:
         (model, scaler, history). `scaler` is a "template" FieldScaler —
@@ -985,8 +1017,43 @@ def train_parametric_field_model(
         flow_rate_cfm, not L/U directly) for the specific design you're
         querying, not this returned scaler's raw L/U.
     """
+    if checkpoint_every is not None and not checkpoint_path:
+        raise ValueError("checkpoint_every requires checkpoint_path to be set.")
+
     if seed is not None:
         torch.manual_seed(seed)
+
+    if resume_from:
+        loaded = load_parametric_field_checkpoint(resume_from)
+        if loaded["hidden"] != hidden or loaded["n_layers"] != n_layers:
+            print(
+                f"[train_parametric_field_model] NOTE: --hidden/--n-layers "
+                f"({hidden}, {n_layers}) ignored — resuming from "
+                f"'{resume_from}' architecture ({loaded['hidden']}, "
+                f"{loaded['n_layers']})."
+            )
+        hidden, n_layers = loaded["hidden"], loaded["n_layers"]
+        model = loaded["model"].to(device)
+        model.train()
+        resumed_scaler = loaded["scaler"]
+        if (resumed_scaler.D_min, resumed_scaler.D_max) != diameter_range_m or (
+            resumed_scaler.Q_min, resumed_scaler.Q_max
+        ) != flow_rate_range_cfm:
+            print(
+                f"[train_parametric_field_model] NOTE: --diameter-*/--flow-* "
+                f"range ignored — resuming from '{resume_from}''s trained "
+                f"window diameter=[{resumed_scaler.D_min}, "
+                f"{resumed_scaler.D_max}] m, "
+                f"flow=[{resumed_scaler.Q_min}, {resumed_scaler.Q_max}] CFM. "
+                f"Changing this window mid-training would make D_norm/Q_norm "
+                f"mean something different than what the network already "
+                f"learned (see FieldScaler.with_scales)."
+            )
+        diameter_range_m = (resumed_scaler.D_min, resumed_scaler.D_max)
+        flow_rate_range_cfm = (resumed_scaler.Q_min, resumed_scaler.Q_max)
+    else:
+        model = CycloneFieldPINN(hidden=hidden, n_layers=n_layers).to(device)
+        model.train()
 
     # Fixed for the whole run — this is what makes D_norm/Q_norm mean the
     # same thing on epoch 1 and epoch 20000 (see FieldScaler.with_scales).
@@ -995,9 +1062,6 @@ def train_parametric_field_model(
         diameter_range_m=diameter_range_m,
         flow_rate_range_cfm=flow_rate_range_cfm,
     )
-
-    model = CycloneFieldPINN(hidden=hidden, n_layers=n_layers).to(device)
-    model.train()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr_start)
     decay_gamma = (lr_end / lr_start) ** (1.0 / max(epochs, 1))
@@ -1079,11 +1143,30 @@ def train_parametric_field_model(
         if on_progress is not None and (epoch % progress_every == 0 or epoch == epochs):
             on_progress(epoch, epochs, loss_value)
 
+        if checkpoint_every is not None and (
+            epoch % checkpoint_every == 0 or epoch == epochs
+        ):
+            save_parametric_field_checkpoint(
+                checkpoint_path,
+                model=model,
+                scaler=template_scaler,
+                ratios=ratios,
+                operating_temp_c=operating_temp_c,
+                operating_press_kpa=operating_press_kpa,
+                gas_type=gas_type,
+                hidden=hidden,
+                n_layers=n_layers,
+            )
+            print(f"[train_parametric_field_model] checkpoint saved at "
+                  f"epoch {epoch}/{epochs} -> {checkpoint_path}")
+
     model.eval()
     history = {
         "loss": loss_history,
         "final_loss": loss_history[-1] if loss_history else float("nan"),
         "wall_time_s": time.time() - start_time,
+        "hidden": hidden,
+        "n_layers": n_layers,
     }
     return model, template_scaler, history
 
@@ -1130,6 +1213,41 @@ def save_parametric_field_checkpoint(
         },
         path,
     )
+
+
+def load_parametric_field_checkpoint(path: str) -> dict:
+    """Shared loader for parametric checkpoints (checkpoint_kind ==
+    "parametric") — used by both train_parametric_field_model's
+    `resume_from` (continue training) and app.py's serving path (inference
+    only), so there is exactly one place that knows this file's format.
+
+    Returns model in eval() mode with requires_grad left as-is on its
+    parameters (resume_from re-enables .train() itself before continuing;
+    app.py leaves it in eval() for serving).
+    """
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    if ckpt.get("checkpoint_kind") != "parametric":
+        raise RuntimeError(
+            f"'{path}' is not a parametric checkpoint (missing/invalid "
+            f"checkpoint_kind). Produce one with "
+            f"`python field_train.py --mode parametric --save-checkpoint ...` "
+            f"— a single-geometry checkpoint from --mode single is not "
+            f"compatible with resume/serve."
+        )
+    model = CycloneFieldPINN(hidden=ckpt["hidden"], n_layers=ckpt["n_layers"])
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+    scaler = FieldScaler.from_state_dict(ckpt["scaler_state_dict"])
+    return {
+        "model": model,
+        "scaler": scaler,
+        "hidden": ckpt["hidden"],
+        "n_layers": ckpt["n_layers"],
+        "ratios": ckpt.get("ratios"),
+        "operating_temp_c": ckpt.get("operating_temp_c"),
+        "operating_press_kpa": ckpt.get("operating_press_kpa"),
+        "gas_type": ckpt.get("gas_type"),
+    }
 
 
 def evaluate_parametric_interpolation(
@@ -1276,6 +1394,22 @@ def _build_arg_parser():
                            "deploy the file' step; load it in app.py for "
                            "inference-only serving with no training after deploy. "
                            "REQUIRED for --mode parametric.")
+    out.add_argument("--checkpoint-every", type=int, default=None,
+                      help="--mode parametric only: save an intermediate checkpoint "
+                           "to --save-checkpoint every this-many epochs (plus once "
+                           "at the final epoch), so a disconnect/crash loses at most "
+                           "this many epochs of progress instead of the whole run. "
+                           "E.g. --epochs 20000 --checkpoint-every 2000 lets you "
+                           "watch the loss curve and stop early once it plateaus, "
+                           "picking up the most recent save.")
+    out.add_argument("--resume-from", type=str, default=None,
+                      help="--mode parametric only: path to an existing parametric "
+                           "checkpoint to continue training from (e.g. one saved by "
+                           "--checkpoint-every from a previous, interrupted run) "
+                           "instead of a fresh random init. The checkpoint's own "
+                           "architecture and trained diameter/flow-rate window are "
+                           "used; --hidden/--n-layers/--diameter-*/--flow-* are "
+                           "ignored with a printed note if they'd otherwise differ.")
 
     return p
 
@@ -1376,13 +1510,22 @@ def _run_parametric_mode(args, parser, on_progress) -> None:
             "for app.py to load (there is no single grid/geometry to print, "
             "unlike --mode single)."
         )
+    if args.checkpoint_every is not None and args.checkpoint_every <= 0:
+        parser.error("--checkpoint-every must be a positive integer.")
 
-    print(
-        f"Training field model (parametric): "
-        f"diameter=[{args.diameter_min_mm}, {args.diameter_max_mm}]mm, "
-        f"flow=[{args.flow_min_cfm}, {args.flow_max_cfm}]CFM, gas={args.gas_type}, "
-        f"epochs={args.epochs} (Adam only, domain-randomized)"
-    )
+    if args.resume_from:
+        print(f"Resuming parametric training from '{args.resume_from}' "
+              f"for {args.epochs} more epochs...")
+    else:
+        print(
+            f"Training field model (parametric): "
+            f"diameter=[{args.diameter_min_mm}, {args.diameter_max_mm}]mm, "
+            f"flow=[{args.flow_min_cfm}, {args.flow_max_cfm}]CFM, gas={args.gas_type}, "
+            f"epochs={args.epochs} (Adam only, domain-randomized)"
+        )
+    if args.checkpoint_every:
+        print(f"Intermediate checkpoints every {args.checkpoint_every} epochs "
+              f"-> {args.save_checkpoint}")
 
     model, scaler, history = train_parametric_field_model(
         rho_fn=fluid_properties,
@@ -1403,11 +1546,19 @@ def _run_parametric_mode(args, parser, on_progress) -> None:
         seed=args.seed,
         on_progress=on_progress,
         progress_every=args.progress_every,
+        resume_from=args.resume_from,
+        checkpoint_every=args.checkpoint_every,
+        checkpoint_path=args.save_checkpoint,
     )
 
     print("\n── Done ──────────────────────────────────────────────")
     print(f"final_loss={history['final_loss']:.6e}  wall_time_s={history['wall_time_s']:.1f}")
 
+    # Use the ACTUALLY-used architecture (history["hidden"]/["n_layers"]),
+    # not args.hidden/args.n_layers directly — if --resume-from overrode
+    # them (see train_parametric_field_model docstring), saving args'
+    # values here would write a checkpoint whose recorded architecture
+    # doesn't match the model's real state_dict shapes.
     save_parametric_field_checkpoint(
         args.save_checkpoint,
         model=model,
@@ -1416,8 +1567,8 @@ def _run_parametric_mode(args, parser, on_progress) -> None:
         operating_temp_c=args.operating_temp_c,
         operating_press_kpa=args.operating_press_kpa,
         gas_type=args.gas_type,
-        hidden=args.hidden,
-        n_layers=args.n_layers,
+        hidden=history["hidden"],
+        n_layers=history["n_layers"],
     )
     print(f"Saved parametric production inference checkpoint to {args.save_checkpoint}")
 
