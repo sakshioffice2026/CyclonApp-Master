@@ -24,16 +24,23 @@ WHAT YOU NEED IN THE COLAB SESSION (same folder, upload all of them):
 HOW TO RUN IN COLAB:
     1. Runtime -> Change runtime type -> GPU (optional but faster; CPU
        works fine too, this network is small).
-    2. Upload the 8 files above into the Colab file browser (left sidebar)
+    2. Mount Google Drive first (separate cell):
+           from google.colab import drive
+           drive.mount('/content/drive')
+    3. Attach a GPU runtime: Runtime -> Change runtime type -> T4 GPU.
+       DEVICE below is hardcoded to "cuda" -- this will crash if no GPU
+       is attached.
+    4. Upload the 8 files above into the Colab file browser (left sidebar)
        so they sit in /content alongside each other.
-    3. In a cell:  !pip install torch --quiet   (Colab usually already has
-       it; this is a no-op if so)
-    4. In a new cell:  !pip install onnx --quiet   (needed for the ONNX
-       export step at the bottom of this script)
-    5. In a new cell:  %run train_stairmand_colab.py
+    5. In a cell:  !pip install onnx --quiet   (needed for the ONNX
+       export step at the bottom of this script; torch is already
+       preinstalled in Colab)
+    6. In a new cell:  %run train_stairmand_colab.py
        (or just paste this whole file's contents into one cell and run it)
-    6. When it finishes, download the two output files from the Colab
-       file browser:
+    7. Both output files are saved straight to your Drive root as they're
+       produced -- CHECKPOINT_PATH and ONNX_OUTPUT_PATH below both point
+       to /content/drive/MyDrive/, so there's nothing to manually
+       download from the Colab file browser:
            cyclone_model_stairmand.pth    (checkpoint — keep for later
                                             resume/retraining)
            cyclone_model_stairmand.onnx   (this is the file to give to
@@ -102,8 +109,8 @@ CHECKPOINT_EVERY = 2000
 # continue training instead of starting over. Leave as None for a fresh run.
 RESUME_FROM: str | None = None
 
-CHECKPOINT_PATH = "cyclone_model_stairmand.pth"
-ONNX_OUTPUT_PATH = "cyclone_model_stairmand.onnx"
+CHECKPOINT_PATH = "/content/drive/MyDrive/cyclone_model_stairmand.pth"
+ONNX_OUTPUT_PATH = "/content/drive/MyDrive/cyclone_model_stairmand.onnx"
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -175,7 +182,7 @@ def main() -> None:
     print(f"Saved ONNX model -> {ONNX_OUTPUT_PATH}")
 
     print(
-        "\nDone. Download both files from the Colab file browser:\n"
+        "\nDone. Both files were saved directly to your Google Drive root:\n"
         f"  {CHECKPOINT_PATH}   (keep for future resume/retraining)\n"
         f"  {ONNX_OUTPUT_PATH}  (give this one to the .NET side — it goes "
         f"in Web/Models/ and gets wired up via "
