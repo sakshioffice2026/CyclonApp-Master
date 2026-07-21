@@ -1,6 +1,4 @@
-﻿using Microsoft.EntityFrameworkCore;
-
-"""
+﻿"""
 train_stairmand_colab.py
 ─────────────────────────
 Run this top-to-bottom in a Google Colab notebook to train the Stairmand
@@ -118,39 +116,36 @@ def _print_progress(epoch: int, total: int, loss: float) -> None:
 
 
 def main() -> None:
-print(
-    f"Training Stairmand HE field model: "
-
-    f"diameter=[{DIAMETER_MIN_MM}, {DIAMETER_MAX_MM}]mm, "
-
-    f"flow=[{FLOW_MIN_CFM}, {FLOW_MAX_CFM}]CFM, gas={GAS_TYPE}, "
-
-    f"epochs={EPOCHS}, device={DEVICE}"
-)
+    print(
+        f"Training Stairmand HE field model: "
+        f"diameter=[{DIAMETER_MIN_MM}, {DIAMETER_MAX_MM}]mm, "
+        f"flow=[{FLOW_MIN_CFM}, {FLOW_MAX_CFM}]CFM, gas={GAS_TYPE}, "
+        f"epochs={EPOCHS}, device={DEVICE}"
+    )
     print(f"Ratios (STAIRMAND_RATIOS from field_train.py): {STAIRMAND_RATIOS}")
 
     model, scaler, history = train_parametric_field_model(
-        rho_fn = fluid_properties,
-        ratios = STAIRMAND_RATIOS,
-        diameter_range_m = (DIAMETER_MIN_MM * 1e-3, DIAMETER_MAX_MM * 1e-3),
-        flow_rate_range_cfm = (FLOW_MIN_CFM, FLOW_MAX_CFM),
-        operating_temp_c = OPERATING_TEMP_C,
-        operating_press_kpa = OPERATING_PRESS_KPA,
-        gas_type = GAS_TYPE,
-        epochs = EPOCHS,
-        n_interior = N_INTERIOR,
-        hidden = HIDDEN,
-        n_layers = N_LAYERS,
-        lr_start = LR_ADAM_START,
-        lr_end = LR_ADAM_END,
-        grad_clip_norm = GRAD_CLIP_NORM,
-        device = DEVICE,
-        seed = SEED,
-        on_progress = _print_progress,
-        progress_every = PROGRESS_EVERY,
-        resume_from = RESUME_FROM,
-        checkpoint_every = CHECKPOINT_EVERY,
-        checkpoint_path = CHECKPOINT_PATH,
+        rho_fn=fluid_properties,
+        ratios=STAIRMAND_RATIOS,
+        diameter_range_m=(DIAMETER_MIN_MM * 1e-3, DIAMETER_MAX_MM * 1e-3),
+        flow_rate_range_cfm=(FLOW_MIN_CFM, FLOW_MAX_CFM),
+        operating_temp_c=OPERATING_TEMP_C,
+        operating_press_kpa=OPERATING_PRESS_KPA,
+        gas_type=GAS_TYPE,
+        epochs=EPOCHS,
+        n_interior=N_INTERIOR,
+        hidden=HIDDEN,
+        n_layers=N_LAYERS,
+        lr_start=LR_ADAM_START,
+        lr_end=LR_ADAM_END,
+        grad_clip_norm=GRAD_CLIP_NORM,
+        device=DEVICE,
+        seed=SEED,
+        on_progress=_print_progress,
+        progress_every=PROGRESS_EVERY,
+        resume_from=RESUME_FROM,
+        checkpoint_every=CHECKPOINT_EVERY,
+        checkpoint_path=CHECKPOINT_PATH,
     )
 
     print("\n── Training done ────────────────────────────────────────")
@@ -161,14 +156,14 @@ print(
     # actually-final weights).
     save_parametric_field_checkpoint(
         CHECKPOINT_PATH,
-        model = model,
-        scaler = scaler,
-        ratios = STAIRMAND_RATIOS,
-        operating_temp_c = OPERATING_TEMP_C,
-        operating_press_kpa = OPERATING_PRESS_KPA,
-        gas_type = GAS_TYPE,
-        hidden = history["hidden"],
-        n_layers = history["n_layers"],
+        model=model,
+        scaler=scaler,
+        ratios=STAIRMAND_RATIOS,
+        operating_temp_c=OPERATING_TEMP_C,
+        operating_press_kpa=OPERATING_PRESS_KPA,
+        gas_type=GAS_TYPE,
+        hidden=history["hidden"],
+        n_layers=history["n_layers"],
     )
     print(f"Saved checkpoint -> {CHECKPOINT_PATH}")
 
