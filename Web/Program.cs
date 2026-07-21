@@ -6,6 +6,7 @@ using CyclonApp.Repositories.Repositories;
 using DocumentFormat.OpenXml.Office2016.Drawing.ChartDrawing;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.EntityFrameworkCore;
+using System.Linq;
 using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -48,19 +49,34 @@ builder.Services.AddScoped<ExceptionHandlerRepository>();
 builder.Services.AddHttpClient("CyclonePrediction"); // name must match CreateClient("CyclonePrediction") in the repository
 builder.Services.AddScoped<ICyclonePrediction, CyclonePredictionRepository>();
 builder.Services.AddScoped<IEngineeringInsight, EngineeringInsightRepository>();
-builder.Services.AddSingleton<CycloneFieldOnnxPredictor>(sp =>
+builder.Services.AddSingleton<CycloneFieldOnnxPredictorProvider>(sp =>
 {
     var env = sp.GetRequiredService<IWebHostEnvironment>();
     var config = sp.GetRequiredService<IConfiguration>();
 
-    // Falls back to "cyclone_model.onnx" (resolved under Models/) if the
-    // config key is missing, but normally comes from
-    // CyclonePredictionService:OnnxModelPath in appsettings.json.
-    var configuredFileName = config["CyclonePredictionService:OnnxModelPath"]
-                              ?? "cyclone_model.onnx";
+    // Per-cyclone-type model files, e.g.:
+    //   "CyclonePredictionService:OnnxModelPathsByType": {
+    //     "LAPPLE": "cyclone_model.onnx",
+    //     "STAIRMAND": "cyclone_model_stairmand.onnx"
+    //   }
+    // Each cyclone family (Lapple, Stairmand, ...) is trained separately
+    // (see field_train.py's LAPPLE_RATIOS / STAIRMAND_RATIOS) and exported
+    // to its own .onnx file, so one model file cannot serve every type.
+    var modelPathsByType = config
+        .GetSection("CyclonePredictionService:OnnxModelPathsByType")
+        .GetChildren()
+        .ToDictionary(c => c.Key, c => c.Value ?? "", StringComparer.OrdinalIgnoreCase);
 
-    return new CycloneFieldOnnxPredictor(
-        Path.Combine(env.ContentRootPath, "Models", configuredFileName));
+    // Falls back to "cyclone_model.onnx" for any type without an explicit
+    // entry — preserves the original single-model behavior (Lapple) if the
+    // new config section hasn't been set up yet.
+    var defaultFileName = config["CyclonePredictionService:OnnxModelPath"]
+                           ?? "cyclone_model.onnx";
+
+    return new CycloneFieldOnnxPredictorProvider(
+        Path.Combine(env.ContentRootPath, "Models"),
+        modelPathsByType,
+        defaultFileName);
 });
 builder.Services
     .AddControllersWithViews()

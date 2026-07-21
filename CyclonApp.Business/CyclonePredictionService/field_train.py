@@ -860,6 +860,36 @@ LAPPLE_RATIOS: dict[str, float] = {
     "ExhaustLengthRatio": 0.625,
 }
 
+# Standard Stairmand High-Efficiency (HE) cyclone proportions (dimension /
+# barrel diameter D), as published in the Stairmand HE geometry spec.
+# Unlike LAPPLE_RATIOS above, every one of these 7 values (including
+# ExhaustLengthRatio, the vortex-finder length) has a directly documented
+# figure — there is no "no universally agreed literature figure" placeholder
+# needed here:
+#   Inlet height   a  = 0.50 D  -> InletHeightRatio
+#   Inlet width    b  = 0.20 D  -> InletWidthRatio
+#   Cylinder ht.   h  = 1.50 D  -> BarrelHeightRatio
+#   Cone height    Hc = 2.50 D  -> ConeHeightRatio
+#   Vortex-finder diameter De = 0.50 D -> OutletDiamRatio
+#   Vortex-finder length   S  = 0.50 D -> ExhaustLengthRatio
+#   Dust outlet diameter   B  = 0.375 D -> BottomOutletRatio
+#
+# Same caveat as LAPPLE_RATIOS applies: this is a textbook default for
+# running this module standalone. Before a production training run, pull
+# the actual "Stairmand" row's ratios from the CycloneType DB table so the
+# PINN is trained on exactly the geometry family the rest of the app (and
+# any Lapple-cut-size/Shepherd-Lapple analytic comparison) uses for that
+# type — do not let this dict silently drift out of sync with that row.
+STAIRMAND_RATIOS: dict[str, float] = {
+    "InletHeightRatio": 0.50,
+    "InletWidthRatio": 0.20,
+    "BarrelHeightRatio": 1.50,
+    "ConeHeightRatio": 2.50,
+    "OutletDiamRatio": 0.50,
+    "BottomOutletRatio": 0.375,
+    "ExhaustLengthRatio": 0.50,
+}
+
 
 def geometry_mm_from_diameter(
     barrel_diameter_mm: float, ratios: dict[str, float],
@@ -1330,14 +1360,20 @@ def _build_arg_parser():
             "--mode single (default) trains one fixed geometry/operating "
             "point and evaluates a grid, matching what /predict_field/start "
             "would produce for the same inputs. --mode parametric trains "
-            "ONE network across a whole LAPPLE diameter/flow-rate family via "
-            "domain randomization (see train_parametric_field_model) and "
+            "ONE network across a whole diameter/flow-rate family (Lapple or "
+            "Stairmand — see --ratios-preset) via domain randomization (see "
+            "train_parametric_field_model) and "
             "requires --save-checkpoint — this is the actual 'train in "
             "Colab, deploy the checkpoint' step for app.py's production "
             "inference mode."
         ),
     )
     p.add_argument("--mode", choices=["single", "parametric"], default="single")
+    p.add_argument("--ratios-preset", choices=["lapple", "stairmand"], default="lapple",
+                   help="--mode parametric only: which cyclone family's fixed "
+                        "dimension ratios (LAPPLE_RATIOS / STAIRMAND_RATIOS above) "
+                        "to scale every sampled diameter against. Each family needs "
+                        "its own checkpoint/.onnx — see those dicts' docstrings.")
 
     geo = p.add_argument_group("geometry (mm) — required for --mode single only")
     geo.add_argument("--barrel-diameter-mm", type=float, default=None)
@@ -1513,12 +1549,14 @@ def _run_parametric_mode(args, parser, on_progress) -> None:
     if args.checkpoint_every is not None and args.checkpoint_every <= 0:
         parser.error("--checkpoint-every must be a positive integer.")
 
+    ratios = STAIRMAND_RATIOS if args.ratios_preset == "stairmand" else LAPPLE_RATIOS
+
     if args.resume_from:
         print(f"Resuming parametric training from '{args.resume_from}' "
               f"for {args.epochs} more epochs...")
     else:
         print(
-            f"Training field model (parametric): "
+            f"Training field model (parametric, {args.ratios_preset}): "
             f"diameter=[{args.diameter_min_mm}, {args.diameter_max_mm}]mm, "
             f"flow=[{args.flow_min_cfm}, {args.flow_max_cfm}]CFM, gas={args.gas_type}, "
             f"epochs={args.epochs} (Adam only, domain-randomized)"
@@ -1529,7 +1567,7 @@ def _run_parametric_mode(args, parser, on_progress) -> None:
 
     model, scaler, history = train_parametric_field_model(
         rho_fn=fluid_properties,
-        ratios=LAPPLE_RATIOS,
+        ratios=ratios,
         diameter_range_m=(args.diameter_min_mm * 1e-3, args.diameter_max_mm * 1e-3),
         flow_rate_range_cfm=(args.flow_min_cfm, args.flow_max_cfm),
         operating_temp_c=args.operating_temp_c,
@@ -1563,7 +1601,7 @@ def _run_parametric_mode(args, parser, on_progress) -> None:
         args.save_checkpoint,
         model=model,
         scaler=scaler,
-        ratios=LAPPLE_RATIOS,
+        ratios=ratios,
         operating_temp_c=args.operating_temp_c,
         operating_press_kpa=args.operating_press_kpa,
         gas_type=args.gas_type,

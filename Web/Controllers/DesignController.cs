@@ -22,7 +22,7 @@ public class DesignController : Controller
     private readonly ICyclonePrediction _predictionRepository;
     private readonly ILogger<DesignController> _logger;
     private readonly IEngineeringInsight _engineeringInsight;
-    private readonly CycloneFieldOnnxPredictor _onnxPredictor;
+    private readonly CycloneFieldOnnxPredictorProvider _onnxPredictorProvider;
     public readonly IUnitOfWork _uow;
 
 
@@ -36,7 +36,7 @@ public class DesignController : Controller
     ICyclonCalculation calculationRepository,
     ICyclonePrediction predictionRepository,
     IEngineeringInsight engineeringInsight,
-    CycloneFieldOnnxPredictor onnxPredictor,
+    CycloneFieldOnnxPredictorProvider onnxPredictorProvider,
     ILogger<DesignController> logger,
     IUnitOfWork uow)
     {
@@ -46,7 +46,7 @@ public class DesignController : Controller
         _calculationRepository = calculationRepository;
         _predictionRepository = predictionRepository;
         _engineeringInsight = engineeringInsight;
-        _onnxPredictor = onnxPredictor;
+        _onnxPredictorProvider = onnxPredictorProvider;
         _logger = logger;
         _uow = uow;
     }
@@ -717,6 +717,8 @@ public class DesignController : Controller
                 return BadRequest(new { error = "Run the standard calculation for this revision first — no geometry available yet." });
             }
 
+            var cycloneTypeCode = revision.CycloneDesign.CycloneType.Code;
+
             var grid = CycloneFieldGridBuilder.Build(
                 barrelDiameterM: dims.BarrelDiameterM,
                 barrelHeightM: dims.BarrelHeightMm / 1000.0,
@@ -731,7 +733,23 @@ public class DesignController : Controller
             var flowRateCfm = (float)revision.FlowRateCFM;
             var diameterM = (float)dims.BarrelDiameterM;
 
-            var result = _onnxPredictor.Predict(grid.R, grid.Z, diameterM, flowRateCfm);
+            CycloneFieldOnnxPredictor onnxPredictor;
+            try
+            {
+                onnxPredictor = _onnxPredictorProvider.GetPredictor(cycloneTypeCode);
+            }
+            catch (System.IO.FileNotFoundException)
+            {
+                return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+                {
+                    error = $"No trained field-prediction model is deployed yet for cyclone type " +
+                             $"'{cycloneTypeCode}'. The standard Lapple/Shepherd-Lapple calculation " +
+                             $"above is still valid — this ONNX preview just isn't available for this " +
+                             $"type until its model is trained and deployed."
+                });
+            }
+
+            var result = onnxPredictor.Predict(grid.R, grid.Z, diameterM, flowRateCfm);
 
             var dto = new FieldResultDto
             {

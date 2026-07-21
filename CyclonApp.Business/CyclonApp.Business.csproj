@@ -6,6 +6,10 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Include="CyclonePredictionService\train_stairmand_colab.py" />
+  </ItemGroup>
+
  
 
   <ItemGroup>
