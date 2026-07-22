@@ -123,6 +123,7 @@ FIELD_JOB_SWEEP_INTERVAL_SECONDS = 300
 _DEFAULT_CHECKPOINT_PATHS_BY_TYPE = {
     "LAPPLE": "cyclone_model.pth",
     "STAIRMAND": "cyclone_model_stairmand.pth",
+    "STAIRMAND_GP": "cyclone_model_stairmand_gp.pth",
 }
 
 def _load_checkpoint_paths_by_type() -> dict[str, str]:
