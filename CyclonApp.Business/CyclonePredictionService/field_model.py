@@ -72,7 +72,7 @@ class FieldScaler:
         parametric input the network must treat as an explicit signal
         (not just a numerical-conditioning convenience like r/L)."""
         mid = (lo + hi) / 2.0
-        half_span = max((hi - lo) / 2.0, 1e-9)
+        half_span = torch.clamp(torch.as_tensor(hi) - torch.as_tensor(lo), min=1e-9) / 2.0
         return (value - mid) / half_span
 
     def scale_inputs(
