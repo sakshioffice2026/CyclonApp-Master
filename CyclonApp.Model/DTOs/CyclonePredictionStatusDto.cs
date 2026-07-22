@@ -86,6 +86,20 @@ namespace CyclonApp.Model.DTOs
         [JsonPropertyName("vInletMs")]
         public double VInletMs { get; set; }
 
+        /// <summary>Inlet-ring-average minus vortex-finder-bore-average
+        /// static pressure at the z=0 plane, computed Python-side (see
+        /// compute_pressure_drop in sanity_check.py). This is the
+        /// field-solve's estimate of the same quantity
+        /// CyclonCalculationRepository's Shepherd-Lapple dP_Pa describes,
+        /// and should be preferred over any max/min-based approximation
+        /// derived from PressurePa here -- that instead captures the
+        /// radial (swirl) pressure spread, a different physical quantity.
+        /// Null means the Python side couldn't isolate usable inlet/outlet
+        /// points (e.g. too coarse a grid) -- treat as "not computed", not
+        /// as a zero pressure drop.</summary>
+        [JsonPropertyName("pressureDropPa")]
+        public double? PressureDropPa { get; set; }
+
         // ── Mass-conservation diagnostics ────────────────────────────────
         // Nullable: older/unmodified Python service responses (or a
         // failed/partial solve) may omit these entirely. Treating them as

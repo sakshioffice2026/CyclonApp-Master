@@ -28,37 +28,8 @@ namespace CyclonApp.Repositories.Repositories
     {
         private static class Thresholds
         {
-            // FALLBACK ONLY — used when no design-specific baseline is
-            // available (see EvaluatePressureDrop). Same "placeholder,
-            // needs engineer review" caveat as every other threshold in
-            // this class.
             public const double PressureDropWarningPa = 1500.0;
             public const double PressureDropCriticalPa = 2500.0;
-
-            // PREFERRED PATH — how far the field-solve's pressure drop is
-            // allowed to exceed THIS design's own Shepherd-Lapple calculated
-            // ΔP before being flagged. Ratios, not absolute Pa, so the same
-            // rule applies whether the design's calculated baseline is a
-            // GP-typical 400 Pa or an HE-typical 1200 Pa — either way,
-            // running materially higher than what the geometry itself
-            // predicts indicates something is actually wrong (mis-sized
-            // inlet, a solver artifact, wear changing effective geometry,
-            // etc.), rather than just "this type runs high by design."
-            // PLACEHOLDER RATIOS — same caveat as above, have an engineer
-            // confirm 15%/30% are reasonable tolerances before relying on
-            // this in production.
-            public const double PressureDropBaselineWarningRatio = 1.15;
-            public const double PressureDropBaselineCriticalRatio = 1.30;
-
-            // LOW-SIDE — the field-solve landing well BELOW the design's own
-            // calculated baseline is just as much a disagreement as landing
-            // above it, and was previously not checked at all (fell through
-            // to "Good" no matter how large the shortfall was). Same 15%/30%
-            // tolerance, mirrored below 1.0 instead of above it.
-            // PLACEHOLDER RATIOS — same "needs engineer review" caveat as
-            // every other threshold in this class.
-            public const double PressureDropBaselineWarningRatioLow = 0.85;
-            public const double PressureDropBaselineCriticalRatioLow = 0.70;
 
             public const double TangentialVelocityLowMs = 12.0;
             public const double TangentialVelocityWarningMs = 25.0;
@@ -71,7 +42,7 @@ namespace CyclonApp.Repositories.Repositories
             public const double MassFlowSpreadCritical = 0.30;
         }
 
-        public CycloneHealthReportDto GenerateReport(FieldResultDto result, double? knownEfficiencyPercent = null, double? knownPressureDropPa = null)
+        public CycloneHealthReportDto GenerateReport(FieldResultDto result, double? knownEfficiencyPercent = null)
         {
             if (result == null) throw new ArgumentNullException(nameof(result));
 
@@ -81,7 +52,7 @@ namespace CyclonApp.Repositories.Repositories
             double avgTangential = Average(result.VThetaMs);
             double maxWallVelocity = ComputeMaxWallVelocity(result);
 
-            insights.Add(EvaluatePressureDrop(maxPressureDrop, knownPressureDropPa));
+            insights.Add(EvaluatePressureDrop(maxPressureDrop));
             insights.Add(EvaluateSwirlStrength(avgTangential));
             insights.Add(EvaluateWallVelocity(maxWallVelocity));
             insights.Add(EvaluateMassConservation(result));
@@ -270,114 +241,8 @@ namespace CyclonApp.Repositories.Repositories
 
         // ── Individual rule evaluators ──────────────────────────────────
 
-        /// <summary>
-        /// Judges the field-solve's pressure drop against THIS design's own
-        /// Shepherd-Lapple calculated ΔP (<paramref name="knownPressureDropPa"/>)
-        /// whenever it's available, rather than one fixed Pa threshold shared
-        /// by every cyclone type. A Stairmand GP and a Stairmand HE are
-        /// *supposed* to show different absolute pressure drops at the same
-        /// flow rate — that's the entire design tradeoff between them — so a
-        /// flat threshold either flags normal HE performance as a problem or
-        /// never flags an actually-oversized GP inlet. Comparing against the
-        /// design's own calculated baseline sidesteps that: it asks "does the
-        /// field-solve agree with what this exact geometry should produce",
-        /// which is type-agnostic by construction, instead of "is this an
-        /// unusually high number in general".
-        ///
-        /// FALLBACK: when no baseline is supplied (e.g. the standard
-        /// calculation for this revision hasn't been run), falls back to the
-        /// old fixed absolute thresholds so this insight still degrades
-        /// gracefully rather than being skipped outright.
-        /// </summary>
-        private EngineeringInsightDto EvaluatePressureDrop(double pressureDropPa, double? knownPressureDropPa = null)
+        private EngineeringInsightDto EvaluatePressureDrop(double pressureDropPa)
         {
-            if (knownPressureDropPa.HasValue && knownPressureDropPa.Value > 0)
-            {
-                double baseline = knownPressureDropPa.Value;
-                double ratio = pressureDropPa / baseline;
-                double pctOver = (ratio - 1.0) * 100.0;
-
-                if (ratio >= Thresholds.PressureDropBaselineCriticalRatio)
-                {
-                    return new EngineeringInsightDto
-                    {
-                        Category = "Pressure Drop",
-                        Severity = InsightSeverity.Critical,
-                        WhatHappened = $"Field-solve pressure loss ({pressureDropPa:F0} Pa) is {pctOver:F0}% above this " +
-                                       $"design's own calculated baseline ({baseline:F0} Pa) — well outside normal " +
-                                       $"agreement for this geometry.",
-                        Why = "Either the inlet velocity is higher than the design geometry accounts for, or the " +
-                              "field-solve result itself has not converged to a physically consistent answer.",
-                        Impact = new List<string> { "Significantly higher fan power consumption", "Higher operating cost", "Increased wall wear", "Reduced confidence in this field-solve result" },
-                        Recommendation = "Reduce inlet velocity or increase cyclone diameter, and re-run the simulation; if the gap persists, check the mass-conservation result before trusting this number."
-                    };
-                }
-                if (ratio >= Thresholds.PressureDropBaselineWarningRatio)
-                {
-                    return new EngineeringInsightDto
-                    {
-                        Category = "Pressure Drop",
-                        Severity = InsightSeverity.Warning,
-                        WhatHappened = $"Field-solve pressure loss ({pressureDropPa:F0} Pa) is {pctOver:F0}% above this " +
-                                       $"design's own calculated baseline ({baseline:F0} Pa).",
-                        Why = "Air is entering somewhat faster than this geometry's calculated design point assumes.",
-                        Impact = new List<string> { "Increased fan power", "Higher operating cost", "Increased wall wear" },
-                        Recommendation = "Reduce inlet velocity by approximately 8-12% or optimize cyclone dimensions."
-                    };
-                }
-                // LOW SIDE — previously missing entirely, so any shortfall
-                // fell straight through to "Good" regardless of size. A
-                // field-solve landing far BELOW the calculated baseline is
-                // just as much a disagreement as landing far above it: it
-                // can mean the request fell outside the trained
-                // diameter/flow range (extrapolation, not a validated
-                // prediction — check the Python service's console for a
-                // "request ... is outside the trained range" warning), or
-                // that training itself under-predicts for this design.
-                if (ratio <= Thresholds.PressureDropBaselineCriticalRatioLow)
-                {
-                    double pctUnder = (1.0 - ratio) * 100.0;
-                    return new EngineeringInsightDto
-                    {
-                        Category = "Pressure Drop",
-                        Severity = InsightSeverity.Critical,
-                        WhatHappened = $"Field-solve pressure loss ({pressureDropPa:F0} Pa) is {pctUnder:F0}% BELOW this " +
-                                       $"design's own calculated baseline ({baseline:F0} Pa) — well outside normal " +
-                                       $"agreement for this geometry.",
-                        Why = "The field-solve model may be extrapolating outside the diameter/flow range it was " +
-                              "trained on for this cyclone type, or has under-converged for this design point.",
-                        Impact = new List<string> { "This field-solve result should not be trusted at face value", "Reduced confidence in downstream swirl/wall-velocity numbers from the same solve" },
-                        Recommendation = "Confirm this design's diameter and flow rate fall inside the trained range for its cyclone type; if they do, re-run the simulation and check mass conservation before trusting this number."
-                    };
-                }
-                if (ratio <= Thresholds.PressureDropBaselineWarningRatioLow)
-                {
-                    double pctUnder = (1.0 - ratio) * 100.0;
-                    return new EngineeringInsightDto
-                    {
-                        Category = "Pressure Drop",
-                        Severity = InsightSeverity.Warning,
-                        WhatHappened = $"Field-solve pressure loss ({pressureDropPa:F0} Pa) is {pctUnder:F0}% below this " +
-                                       $"design's own calculated baseline ({baseline:F0} Pa).",
-                        Why = "The field-solve is predicting a notably gentler pressure loss than the analytic " +
-                              "calculation for this exact geometry.",
-                        Impact = new List<string> { "Worth confirming before relying on this number for fan sizing" },
-                        Recommendation = "Cross-check this design's diameter/flow rate against the trained range for its cyclone type before trusting this value."
-                    };
-                }
-                return new EngineeringInsightDto
-                {
-                    Category = "Pressure Drop",
-                    Severity = InsightSeverity.Good,
-                    WhatHappened = $"Field-solve pressure drop ({pressureDropPa:F0} Pa) agrees with this design's own " +
-                                   $"calculated baseline ({baseline:F0} Pa) (within {Math.Abs(pctOver):F0}%).",
-                    Why = "Inlet velocity and geometry are well matched for this flow rate, and the field-solve confirms it.",
-                    Impact = new List<string> { "Fan energy consumption is at an efficient level" },
-                    Recommendation = "No action needed."
-                };
-            }
-
-            // FALLBACK ONLY — no design-specific baseline supplied.
             if (pressureDropPa >= Thresholds.PressureDropCriticalPa)
             {
                 return new EngineeringInsightDto
@@ -489,31 +354,58 @@ namespace CyclonApp.Repositories.Repositories
 
         private EngineeringInsightDto EvaluateMassConservation(FieldResultDto result)
         {
-            bool passed = string.Equals(result.MassConservationStatus, "ok", StringComparison.OrdinalIgnoreCase);
-            bool isWarningStatus = string.Equals(result.MassConservationStatus, "warning", StringComparison.OrdinalIgnoreCase);
+            // ROOT-CAUSE FIX: this used to re-judge Critical/Warning/Good by
+            // comparing the raw spread number against ITS OWN thresholds
+            // (Thresholds.MassFlowSpreadWarning/Critical = 0.15/0.30) —
+            // different cutoffs from the ones the Python service actually
+            // used to decide MassConservationStatus in the first place
+            // (sanity_check.py: warning >0.2, failed >0.5). The two systems
+            // could disagree: a 34.5% spread was "warning" by Python's own
+            // check (MassConservationPassed stayed true) but "Critical" by
+            // this class's separate 30% line — so that run showed a
+            // Critical card next to a Conclusion verdict that still treated
+            // physics as passed. A 63.1% spread crossed BOTH lines, so that
+            // run's Conclusion used a different wording branch entirely —
+            // making two failing runs look inconsistently reported for no
+            // real reason.
+            //
+            // Fixed: severity here is read directly from
+            // MassConservationStatus — the single value the Python physics
+            // check produced — never re-derived from a second, competing
+            // numeric threshold. One source of truth; this card and the
+            // overall Conclusion (which reads the same status via
+            // MassConservationPassed) can no longer disagree about the
+            // same run.
             double spread = result.MassFlowSpread ?? 0.0;
+            string spreadPercentText = (spread * 100.0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + "%";
 
-            if ((!passed && !isWarningStatus) || spread >= Thresholds.MassFlowSpreadCritical)
+            bool isOk = string.Equals(result.MassConservationStatus, "ok", StringComparison.OrdinalIgnoreCase);
+            bool isWarning = string.Equals(result.MassConservationStatus, "warning", StringComparison.OrdinalIgnoreCase);
+            // Anything that isn't explicitly "ok" or "warning" — including
+            // "failed" and "unknown" — is treated as Critical here, matching
+            // PhysicsValidationDto.MassConservationPassed's own definition
+            // (!= "failed") and staying on the conservative side for any
+            // status value neither side has seen before.
 
-
+            if (isOk)
             {
                 return new EngineeringInsightDto
                 {
                     Category = "Mass Conservation",
-                    Severity = InsightSeverity.Critical,
-                    WhatHappened = "The simulated flow field did not conserve mass within an acceptable tolerance.",
-                    Why = "The underlying physics solve has not converged to a physically consistent flow field.",
-                    Impact = new List<string> { "Dust carryover may increase", "Product recovery may decrease", "Other results in this report are less trustworthy" },
-                    Recommendation = "Re-run the simulation; if this persists, review training configuration before trusting other results."
+                    Severity = InsightSeverity.Good,
+                    WhatHappened = $"Mass conservation passed with low spread across the flow field ({spreadPercentText} variation in volumetric flow across the barrel mid-section).",
+                    Why = "The physics solve converged to a consistent flow field.",
+                    Impact = new List<string> { "Simulation results are reliable" },
+                    Recommendation = "No action needed."
                 };
             }
-            if (spread >= Thresholds.MassFlowSpreadWarning)
+            if (isWarning)
             {
                 return new EngineeringInsightDto
                 {
                     Category = "Mass Conservation",
                     Severity = InsightSeverity.Warning,
-                    WhatHappened = "Mass conservation passed, but with some spread across the flow field.",
+                    WhatHappened = $"Mass conservation passed, but with some spread across the flow field ({spreadPercentText} variation in volumetric flow across the barrel mid-section).",
                     Why = "Minor numerical variation in the physics solve.",
                     Impact = new List<string> { "Small uncertainty in separation efficiency estimates" },
                     Recommendation = "Results are usable; consider a longer training run for higher confidence."
@@ -522,11 +414,11 @@ namespace CyclonApp.Repositories.Repositories
             return new EngineeringInsightDto
             {
                 Category = "Mass Conservation",
-                Severity = InsightSeverity.Good,
-                WhatHappened = "Mass conservation passed with low spread across the flow field.",
-                Why = "The physics solve converged to a consistent flow field.",
-                Impact = new List<string> { "Simulation results are reliable" },
-                Recommendation = "No action needed."
+                Severity = InsightSeverity.Critical,
+                WhatHappened = $"The simulated flow field did not conserve mass within an acceptable tolerance (volumetric flow varied by {spreadPercentText} across the barrel mid-section).",
+                Why = "The underlying physics solve has not converged to a physically consistent flow field.",
+                Impact = new List<string> { "Dust carryover may increase", "Product recovery may decrease", "Other results in this report are less trustworthy" },
+                Recommendation = "Re-run the simulation; if this persists, review training configuration before trusting other results."
             };
         }
 
@@ -645,6 +537,26 @@ namespace CyclonApp.Repositories.Repositories
 
         private double ComputePressureDrop(FieldResultDto result)
         {
+            // Preferred: the Python side's own inlet-plane-avg minus
+            // outlet-plane-avg static pressure (see compute_pressure_drop
+            // in sanity_check.py) -- this is the quantity actually
+            // comparable to CyclonCalculationRepository's Shepherd-Lapple
+            // dP_Pa (total pressure loss along the flow path).
+            if (result.PressureDropPa.HasValue)
+            {
+                return result.PressureDropPa.Value;
+            }
+
+            // Fallback for results predating this field (e.g. a cached
+            // job result from before the Python service was updated).
+            // WARNING: max(PressurePa) - min(PressurePa) over the whole
+            // grid is NOT the same physical quantity -- in a swirling
+            // cyclone flow it's dominated by the radial (centrifugal)
+            // pressure spread between the outer wall and the vortex core,
+            // not the axial inlet-to-outlet total-pressure loss. This
+            // fallback exists only so old results still return *something*
+            // rather than throwing; do not treat it as validated against
+            // the Shepherd-Lapple baseline the way the preferred path is.
             if (result.PressurePa == null || result.PressurePa.Count == 0) return 0.0;
             return result.PressurePa.Max() - result.PressurePa.Min();
         }

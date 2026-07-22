@@ -86,7 +86,7 @@ from field_physics import (
     inlet_axial_velocity_ms,
 )
 from field_turbulence import hydraulic_diameter_rect_m, inlet_turbulence_quantities
-from sanity_check import mass_conservation_metrics
+from sanity_check import mass_conservation_metrics, compute_pressure_drop
 
 app = FastAPI(title="Cyclone Prediction Service (Physics-Informed)")
 
@@ -311,6 +311,17 @@ class FieldResultDto(BaseModel):
     nu_m2s: float = Field(alias="NuM2s")
     v_inlet_ms: float = Field(alias="VInletMs")
 
+    # Inlet-ring-average minus vortex-finder-bore-average static pressure
+    # at the z=0 plane (see compute_pressure_drop in sanity_check.py) --
+    # the field-solve's own estimate of the SAME quantity the
+    # Shepherd-Lapple baseline's dP_Pa describes. Optional/nullable: None
+    # means compute_pressure_drop couldn't find usable points on both
+    # sides of r_exhaust (e.g. too coarse a grid), NOT that the drop is
+    # zero. Deliberately separate from the existing "pressure_pa" field
+    # (the raw per-point field, still needed for visualization) so this
+    # doesn't change that field's meaning for any existing consumer.
+    pressure_drop_pa: Optional[float] = Field(alias="PressureDropPa", default=None)
+
     # Mass-conservation diagnostics — optional/nullable to match the .NET
     # side's FieldResultDto, which treats their absence as "not computed"
     # rather than an error.
@@ -441,11 +452,23 @@ def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
         grid["mass_conservation_status"] = mc["status"]
         grid["mass_flow_spread"] = mc["rel_spread"]
 
+        # See compute_pressure_drop's docstring for why this -- not
+        # max(pressure_pa) - min(pressure_pa) over the whole grid -- is
+        # the quantity comparable to CyclonCalculationRepository.cs's
+        # Shepherd-Lapple dP_Pa.
+        pdrop = compute_pressure_drop(grid, r_exhaust_m=geometry.r_exhaust)
+        if pdrop["pressure_drop_pa"] is None:
+            print(
+                f"[predict_field] WARNING: could not compute inlet/outlet "
+                f"pressure drop for job {job_id}: {pdrop['detail']}"
+            )
+
         field_result = FieldResultDto(
             r_m=grid["r_m"], z_m=grid["z_m"],
             v_r_ms=grid["v_r_ms"], v_theta_ms=grid["v_theta_ms"],
             v_z_ms=grid["v_z_ms"], pressure_pa=grid["pressure_pa"],
             rho_kgm3=rho, nu_m2s=nu, v_inlet_ms=v_inlet,
+            pressure_drop_pa=pdrop["pressure_drop_pa"],
             # Mass-conservation diagnostics — see run_field_prediction_job's
             # "Root-cause fix" comment. Previously always omitted (None on
             # the wire), which made the .NET Engineering Insights panel

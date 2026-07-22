@@ -209,6 +209,72 @@ def check_wall_and_axis(grid: dict, v_inlet: float) -> bool:
 	return ok
 
 
+def compute_pressure_drop(grid: dict, r_exhaust_m: float) -> dict:
+	"""Pressure drop between the inlet ring and the vortex-finder gas
+	outlet -- both of which sit at the SAME z=0 plane in this axisymmetric
+	model (see CycloneAxisymGeometry.sample_inlet_ring /
+	sample_top_exhaust_outlet in field_physics.py), distinguished only by
+	radius, not by height: r in [r_exhaust, r_barrel] is the inlet ring,
+	r in [0, r_exhaust) is the vortex-finder bore (gas outlet).
+
+	This is the quantity the Shepherd-Lapple baseline's
+	dP_Pa = Nh * 0.5 * rho * v_inlet**2 (CyclonCalculationRepository.cs)
+	is actually describing: total-pressure loss along the flow path,
+	inlet -> outlet. It is NOT the same thing as naively taking
+	max(pressure_pa) - min(pressure_pa) over the whole grid, which mostly
+	measures the radial (centrifugal) pressure spread -- high at the
+	outer wall, low in the vortex core -- rather than the axial
+	inlet-to-outlet loss. That mismatch is a likely explanation for a
+	*consistent* offset between field-solve and baseline pressure drop
+	across many designs (both scale with rho*v_inlet**2, just with a
+	different proportionality constant), rather than random per-design
+	error.
+
+	Returns:
+		{"inlet_pressure_pa": float | None,
+		 "outlet_pressure_pa": float | None,
+		 "pressure_drop_pa": float | None,
+		 "detail": str}
+		All three values are None if there's no usable z~0 plane data
+		(e.g. an empty/degenerate grid, or one side of r_exhaust has no
+		sampled points) -- callers should treat that as "not computed",
+		never silently substitute a zero pressure drop.
+	"""
+	groups = _group_by_z(grid)
+	if not groups:
+		return {
+			"inlet_pressure_pa": None, "outlet_pressure_pa": None,
+			"pressure_drop_pa": None, "detail": "empty grid",
+		}
+
+	z0 = min(groups.keys())  # top plane, z=0 (or nearest sampled value to it)
+	pts = groups[z0]  # list of (r, vr, vt, vz, p)
+
+	inlet_p = [p for (r, _vr, _vt, _vz, p) in pts if r >= r_exhaust_m]
+	outlet_p = [p for (r, _vr, _vt, _vz, p) in pts if r < r_exhaust_m]
+
+	if not inlet_p or not outlet_p:
+		return {
+			"inlet_pressure_pa": None, "outlet_pressure_pa": None,
+			"pressure_drop_pa": None,
+			"detail": (
+				f"z={z0} plane had no points on one side of "
+				f"r_exhaust_m={r_exhaust_m} ({len(inlet_p)} inlet pts, "
+				f"{len(outlet_p)} outlet pts) -- grid resolution may be "
+				f"too coarse in r"
+			),
+		}
+
+	inlet_avg = sum(inlet_p) / len(inlet_p)
+	outlet_avg = sum(outlet_p) / len(outlet_p)
+	return {
+		"inlet_pressure_pa": inlet_avg,
+		"outlet_pressure_pa": outlet_avg,
+		"pressure_drop_pa": inlet_avg - outlet_avg,
+		"detail": f"{len(inlet_p)} inlet pts, {len(outlet_p)} outlet pts at z={z0}",
+	}
+
+
 def mass_conservation_metrics(grid: dict, q_design: float | None = None) -> dict:
 	"""Silent, structured version of the Q(z) mass-conservation check —
 	same math as check_mass_conservation below, but returns a dict instead
