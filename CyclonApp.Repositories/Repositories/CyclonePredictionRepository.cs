@@ -83,6 +83,15 @@ namespace CyclonApp.Repositories.Repositories
 
             var request = new PredictFieldStartRequest
             {
+                // app.py now resolves a per-type checkpoint via
+                // FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE keyed on this field
+                // (_get_inference_state), falling back to LAPPLE (or the
+                // first configured type) with only a server-side console
+                // warning if it's missing/blank — so an omitted value here
+                // does not fail loudly, it silently evaluates the wrong
+                // cyclone type's field. Must be populated for GP/Swift HE/
+                // any non-default type to actually get their own model.
+                CycloneTypeCode = input.CycloneDesign?.CycloneType?.Code ?? "LAPPLE",
                 BarrelDiameterMm = dimensions.BarrelDiameterMm,
                 BarrelHeightMm = dimensions.BarrelHeightMm,
                 ConeHeightMm = dimensions.ConeHeightMm,
@@ -237,6 +246,7 @@ namespace CyclonApp.Repositories.Repositories
         // ── Wire-format classes for the external service call ───────────────────
         private class PredictFieldStartRequest
         {
+            public string CycloneTypeCode { get; set; } = "LAPPLE";
             public double BarrelDiameterMm { get; set; }
             public double BarrelHeightMm { get; set; }
             public double ConeHeightMm { get; set; }

@@ -50,6 +50,16 @@ namespace CyclonApp.Repositories.Repositories
             public const double PressureDropBaselineWarningRatio = 1.15;
             public const double PressureDropBaselineCriticalRatio = 1.30;
 
+            // LOW-SIDE — the field-solve landing well BELOW the design's own
+            // calculated baseline is just as much a disagreement as landing
+            // above it, and was previously not checked at all (fell through
+            // to "Good" no matter how large the shortfall was). Same 15%/30%
+            // tolerance, mirrored below 1.0 instead of above it.
+            // PLACEHOLDER RATIOS — same "needs engineer review" caveat as
+            // every other threshold in this class.
+            public const double PressureDropBaselineWarningRatioLow = 0.85;
+            public const double PressureDropBaselineCriticalRatioLow = 0.70;
+
             public const double TangentialVelocityLowMs = 12.0;
             public const double TangentialVelocityWarningMs = 25.0;
             public const double TangentialVelocityCriticalMs = 40.0;
@@ -315,12 +325,52 @@ namespace CyclonApp.Repositories.Repositories
                         Recommendation = "Reduce inlet velocity by approximately 8-12% or optimize cyclone dimensions."
                     };
                 }
+                // LOW SIDE — previously missing entirely, so any shortfall
+                // fell straight through to "Good" regardless of size. A
+                // field-solve landing far BELOW the calculated baseline is
+                // just as much a disagreement as landing far above it: it
+                // can mean the request fell outside the trained
+                // diameter/flow range (extrapolation, not a validated
+                // prediction — check the Python service's console for a
+                // "request ... is outside the trained range" warning), or
+                // that training itself under-predicts for this design.
+                if (ratio <= Thresholds.PressureDropBaselineCriticalRatioLow)
+                {
+                    double pctUnder = (1.0 - ratio) * 100.0;
+                    return new EngineeringInsightDto
+                    {
+                        Category = "Pressure Drop",
+                        Severity = InsightSeverity.Critical,
+                        WhatHappened = $"Field-solve pressure loss ({pressureDropPa:F0} Pa) is {pctUnder:F0}% BELOW this " +
+                                       $"design's own calculated baseline ({baseline:F0} Pa) — well outside normal " +
+                                       $"agreement for this geometry.",
+                        Why = "The field-solve model may be extrapolating outside the diameter/flow range it was " +
+                              "trained on for this cyclone type, or has under-converged for this design point.",
+                        Impact = new List<string> { "This field-solve result should not be trusted at face value", "Reduced confidence in downstream swirl/wall-velocity numbers from the same solve" },
+                        Recommendation = "Confirm this design's diameter and flow rate fall inside the trained range for its cyclone type; if they do, re-run the simulation and check mass conservation before trusting this number."
+                    };
+                }
+                if (ratio <= Thresholds.PressureDropBaselineWarningRatioLow)
+                {
+                    double pctUnder = (1.0 - ratio) * 100.0;
+                    return new EngineeringInsightDto
+                    {
+                        Category = "Pressure Drop",
+                        Severity = InsightSeverity.Warning,
+                        WhatHappened = $"Field-solve pressure loss ({pressureDropPa:F0} Pa) is {pctUnder:F0}% below this " +
+                                       $"design's own calculated baseline ({baseline:F0} Pa).",
+                        Why = "The field-solve is predicting a notably gentler pressure loss than the analytic " +
+                              "calculation for this exact geometry.",
+                        Impact = new List<string> { "Worth confirming before relying on this number for fan sizing" },
+                        Recommendation = "Cross-check this design's diameter/flow rate against the trained range for its cyclone type before trusting this value."
+                    };
+                }
                 return new EngineeringInsightDto
                 {
                     Category = "Pressure Drop",
                     Severity = InsightSeverity.Good,
                     WhatHappened = $"Field-solve pressure drop ({pressureDropPa:F0} Pa) agrees with this design's own " +
-                                   $"calculated baseline ({baseline:F0} Pa).",
+                                   $"calculated baseline ({baseline:F0} Pa) (within {Math.Abs(pctOver):F0}%).",
                     Why = "Inlet velocity and geometry are well matched for this flow rate, and the field-solve confirms it.",
                     Impact = new List<string> { "Fan energy consumption is at an efficient level" },
                     Recommendation = "No action needed."
