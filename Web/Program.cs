@@ -112,10 +112,16 @@ app.MapControllerRoute(
     name: "default",
     pattern: "{controller=Account}/{action=Login}/{id?}");
 
-// Seed default admin
+
+// Create schema (no EF migrations exist yet) and seed default admin
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+    // NOTE: EnsureCreated() builds tables directly from the current model,
+    // with no migration history. Do NOT mix this with EF migrations later —
+    // if you ever run `dotnet ef migrations add`, switch this to
+    // db.Database.Migrate() instead and drop EnsureCreated().
+    await db.Database.EnsureCreatedAsync();
     await SeedData.InitializeAsync(db);
 }
 
