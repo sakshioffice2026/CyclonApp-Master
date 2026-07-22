@@ -617,7 +617,7 @@ public class DesignController : Controller
                 return BadRequest(new { error = "Run the standard calculation for this revision first — no geometry available yet." });
             }
 
-            var jobId = await _predictionRepository.StartFieldPredictionAsync(revision, dims, output);
+            var jobId = await _predictionRepository.StartFieldPredictionAsync(revision, dims, output?.Efficiency, output?.PressureDropPa);
 
             _logger.LogInformation("Field prediction job {JobId} started for Revision {RevId}.", jobId, id);
 
@@ -664,13 +664,9 @@ public class DesignController : Controller
             {
                 try
                 {
-                    var jobContext = _predictionRepository.GetJobContext(jobId);
-                    status.Insights = _engineeringInsight.GenerateReport(new EngineeringInsightRequestDto
-                    {
-                        Result = status.Result,
-                        CycloneTypeCode = jobContext?.CycloneTypeCode ?? string.Empty,
-                        StandardCalculation = jobContext?.StandardCalculation
-                    });
+                    var knownEfficiency = _predictionRepository.GetKnownEfficiencyPercent(jobId);
+                    var knownPressureDropPa = _predictionRepository.GetKnownPressureDropPa(jobId);
+                    status.Insights = _engineeringInsight.GenerateReport(status.Result, knownEfficiency, knownPressureDropPa);
                 }
                 catch (Exception ex)
                 {
@@ -800,13 +796,9 @@ public class DesignController : Controller
                     "text/html", System.Text.Encoding.UTF8);
             }
 
-            var jobContext = _predictionRepository.GetJobContext(jobId);
-            var report = _engineeringInsight.GenerateReport(new EngineeringInsightRequestDto
-            {
-                Result = status.Result,
-                CycloneTypeCode = jobContext?.CycloneTypeCode ?? string.Empty,
-                StandardCalculation = jobContext?.StandardCalculation
-            });
+            var knownEfficiency = _predictionRepository.GetKnownEfficiencyPercent(jobId);
+            var knownPressureDropPa = _predictionRepository.GetKnownPressureDropPa(jobId);
+            var report = _engineeringInsight.GenerateReport(status.Result, knownEfficiency, knownPressureDropPa);
             var html = _engineeringInsight.BuildReportHtml(report, tagNumber, revisionNumber, projectName);
 
             // Returns HTML in browser — user can File > Print > Save as PDF,

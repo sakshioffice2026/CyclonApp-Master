@@ -16,25 +16,34 @@ namespace CyclonApp.Repositories.Repositories
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly string _baseUrl;
 
-        // jobId -> cyclone type code + standard-calculation output, set by
-        // StartFieldPredictionAsync. Deliberately a `static` field rather
-        // than an instance field: this repository is registered AddScoped
-        // (see Program.cs), so a new instance is created per HTTP request —
-        // a static dictionary is what lets context stashed on the "start
-        // job" request still be readable on the later "poll status" /
-        // "download report" requests. Mirrors the same in-memory-with-TTL
-        // pattern the Python service already uses for job storage (see
-        // app.py), so no extra persistence layer is introduced here. Capped
-        // and opportunistically trimmed so a long-running process doesn't
-        // grow this unbounded if jobs are started far more often than their
-        // results are ever read.
-        //
-        // Replaces the old _knownEfficiencyByJobId (double-only) cache: the
-        // insight engine now needs cut size and other fields off the
-        // standard calculation, not just Efficiency, so the whole object is
-        // cached instead of one number pulled out of it.
-        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CyclonePredictionJobContextDto> _jobContextByJobId = new();
-        private const int MaxCachedContextEntries = 2000;
+        // jobId -> real Lapple-model efficiency (%), set by StartFieldPredictionAsync
+        // when the caller has one. Deliberately a `static` field rather than an
+        // instance field: this repository is registered AddScoped (see
+        // Program.cs), so a new instance is created per HTTP request — a static
+        // dictionary is what lets a value stashed on the "start job" request
+        // still be readable on the later "poll status" / "download report"
+        // requests. Mirrors the same in-memory-with-TTL pattern the Python
+        // service already uses for job storage (see app.py), so no extra
+        // persistence layer is introduced here. Capped and opportunistically
+        // trimmed so a long-running process doesn't grow this unbounded if
+        // jobs are started far more often than their results are ever read.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, double> _knownEfficiencyByJobId = new();
+        private const int MaxCachedEfficiencyEntries = 2000;
+
+        // jobId -> the deterministic Shepherd-Lapple pressure drop (Pa) for
+        // THIS design's own geometry, computed by CyclonCalculationRepository
+        // (CyclonOutputDto.PressureDropPa). Same static/ConcurrentDictionary/
+        // TTL-by-trim pattern as _knownEfficiencyByJobId above, and for the
+        // same reason: this repository is AddScoped, so a value stashed when
+        // the job starts needs a home that survives to the later "poll
+        // status" request on a different instance. Lets the pressure-drop
+        // insight compare the field-solve's result against the actual
+        // design's calculated baseline instead of one fixed Pa threshold
+        // shared by every cyclone type (Lapple/HE/GP all have different
+        // "normal" pressure drops by design) — see
+        // EngineeringInsightRepository.EvaluatePressureDrop.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, double> _knownPressureDropByJobId = new();
+        private const int MaxCachedPressureDropEntries = 2000;
 
         // PostAsJsonAsync, when called with no explicit JsonSerializerOptions,
         // defaults to JsonSerializerDefaults.Web — which camelCases property
@@ -67,28 +76,10 @@ namespace CyclonApp.Repositories.Repositories
         // ever 422/404. Field-solving (/predict_field/*) below is the only
         // prediction contract this service still serves.
 
-        public async Task<string> StartFieldPredictionAsync(DesignRevision input, CyclonDimensions dimensions, CyclonOutputDto? standardCalculation = null)
+        public async Task<string> StartFieldPredictionAsync(DesignRevision input, CyclonDimensions dimensions, double? knownEfficiencyPercent = null, double? knownPressureDropPa = null)
         {
             var client = _httpClientFactory.CreateClient("CyclonePrediction");
             client.BaseAddress = new Uri(_baseUrl);
-
-            // ROOT-CAUSE FIX: the Python field-solving service keeps one
-            // trained model PER cyclone type and picks between them using
-            // this code (see app.py's PRODUCTION INFERENCE MODE note) —
-            // previously this wasn't sent at all, so every request (LAPPLE,
-            // STAIRMAND, whatever the design actually was) was silently
-            // answered by whichever single checkpoint the service happened
-            // to have loaded, which is why results looked the same/wrong
-            // regardless of what was actually being designed. Falls back to
-            // "LAPPLE" only if the navigation properties are somehow missing
-            // (shouldn't happen — GetRevisionWithDetailsAsync always
-            // includes CycloneDesign.CycloneType — but this must never throw
-            // a NullReferenceException here).
-            var cycloneTypeCode = input.CycloneDesign?.CycloneType?.Code;
-            if (string.IsNullOrWhiteSpace(cycloneTypeCode))
-            {
-                cycloneTypeCode = "LAPPLE";
-            }
 
             var request = new PredictFieldStartRequest
             {
@@ -108,8 +99,7 @@ namespace CyclonApp.Repositories.Repositories
                 // default never applies to a row already sitting in the DB
                 // with GasType = NULL — sending that through as JSON null was
                 // failing Pydantic validation (422) before this guard.
-                GasType = string.IsNullOrWhiteSpace(input.GasType) ? "Air" : input.GasType,
-                CycloneTypeCode = cycloneTypeCode
+                GasType = string.IsNullOrWhiteSpace(input.GasType) ? "Air" : input.GasType
             };
 
             var response = await client.PostAsJsonAsync("/predict_field/start", request, OutgoingJsonOptions);
@@ -137,29 +127,46 @@ namespace CyclonApp.Repositories.Repositories
             var result = await response.Content.ReadFromJsonAsync<PredictFieldStartResponse>()
                          ?? throw new Exception("Field prediction service returned an empty start response.");
 
-            if (_jobContextByJobId.Count >= MaxCachedContextEntries)
+            if (knownEfficiencyPercent.HasValue)
             {
-                // Best-effort trim, not a strict LRU — good enough to bound
-                // memory without adding a background sweep for what's
-                // already a short-lived, TTL-bounded set of job ids.
-                foreach (var staleKey in _jobContextByJobId.Keys.Take(MaxCachedContextEntries / 4))
+                if (_knownEfficiencyByJobId.Count >= MaxCachedEfficiencyEntries)
                 {
-                    _jobContextByJobId.TryRemove(staleKey, out _);
+                    // Best-effort trim, not a strict LRU — good enough to bound
+                    // memory without adding a background sweep for what's
+                    // already a short-lived, TTL-bounded set of job ids.
+                    foreach (var staleKey in _knownEfficiencyByJobId.Keys.Take(MaxCachedEfficiencyEntries / 4))
+                    {
+                        _knownEfficiencyByJobId.TryRemove(staleKey, out _);
+                    }
                 }
+
+                _knownEfficiencyByJobId[result.JobId] = knownEfficiencyPercent.Value;
             }
 
-            _jobContextByJobId[result.JobId] = new CyclonePredictionJobContextDto
+            if (knownPressureDropPa.HasValue)
             {
-                CycloneTypeCode = cycloneTypeCode,
-                StandardCalculation = standardCalculation
-            };
+                if (_knownPressureDropByJobId.Count >= MaxCachedPressureDropEntries)
+                {
+                    foreach (var staleKey in _knownPressureDropByJobId.Keys.Take(MaxCachedPressureDropEntries / 4))
+                    {
+                        _knownPressureDropByJobId.TryRemove(staleKey, out _);
+                    }
+                }
+
+                _knownPressureDropByJobId[result.JobId] = knownPressureDropPa.Value;
+            }
 
             return result.JobId;
         }
 
-        public CyclonePredictionJobContextDto? GetJobContext(string jobId)
+        public double? GetKnownEfficiencyPercent(string jobId)
         {
-            return _jobContextByJobId.TryGetValue(jobId, out var value) ? value : null;
+            return _knownEfficiencyByJobId.TryGetValue(jobId, out var value) ? value : null;
+        }
+
+        public double? GetKnownPressureDropPa(string jobId)
+        {
+            return _knownPressureDropByJobId.TryGetValue(jobId, out var value) ? value : null;
         }
 
         public async Task<FieldPredictionStatusDto?> GetFieldPredictionStatusAsync(string jobId)
@@ -242,11 +249,6 @@ namespace CyclonApp.Repositories.Repositories
             public double OperatingTempC { get; set; } = 25.0;
             public double OperatingPressKPa { get; set; } = 101.325;
             public string GasType { get; set; } = "Air";
-
-            // Selects which trained checkpoint the Python service answers
-            // this request with (e.g. "LAPPLE", "STAIRMAND") — see app.py's
-            // PRODUCTION INFERENCE MODE note.
-            public string CycloneTypeCode { get; set; } = "LAPPLE";
         }
 
         private class PredictFieldStartResponse
