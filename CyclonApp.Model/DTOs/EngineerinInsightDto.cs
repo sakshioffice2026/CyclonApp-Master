@@ -93,6 +93,15 @@ namespace CyclonApp.Model.DTOs
             /// engine should degrade gracefully (skip cut-size/Reynolds-based
             /// insights, don't fabricate them) rather than fail.</summary>
             public CyclonOutputDto? StandardCalculation { get; set; }
+
+        public class ExpectedImprovementDto
+        {
+            public string Metric { get; set; }       // e.g. "Pressure Drop"
+            public double Before { get; set; }
+            public double After { get; set; }
+            public string Unit { get; set; }          // e.g. "Pa", "m/s"
+            public string Assumption { get; set; }    // e.g. "assumes ~10% inlet velocity reduction"
         }
+    }
     
 }
