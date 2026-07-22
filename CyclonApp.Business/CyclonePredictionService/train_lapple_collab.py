@@ -1,0 +1,236 @@
+﻿"""
+train_lapple_colab.py
+──────────────────────
+Run this top-to-bottom in a Google Colab notebook to train the Lapple
+(general-purpose) cyclone field model as a PARAMETRIC network — replacing
+the existing cyclone_model.pth, which is a --mode single checkpoint
+(one fixed geometry/flow rate baked in, see the startup warning app.py
+prints when it loads it). No command-line flags — every setting is a
+plain variable in the CONFIG section below.
+
+This is deliberately NOT a new implementation of the training loop: it
+imports LAPPLE_RATIOS and train_parametric_field_model /
+save_parametric_field_checkpoint straight from field_train.py, exactly
+the same way train_stairmand_colab.py and train_stairmand_gp_colab.py do.
+This script is only a convenience wrapper around it for Colab.
+
+NOTE ON THE ORIGINAL cyclone_model.pth: whatever fixed geometry/flow rate
+it was originally trained on isn't recorded anywhere in this repo (--mode
+single takes those as CLI args, and no training log/invocation was saved).
+This script does not attempt to reproduce that point — it trains a fresh
+parametric model across the full DIAMETER/FLOW range below, the same way
+Stairmand and Stairmand GP were retrained. Once this succeeds, the new
+checkpoint supersedes the old single-geometry one; the old cyclone_model.pth
+can be retired once you've confirmed the new one loads without the
+"single-geometry checkpoint" warning.
+
+WHAT YOU NEED IN THE COLAB SESSION (same folder, upload all of them):
+    field_train.py
+    field_model.py
+    field_physics.py
+    field_turbulence.py
+    field_boundary_conditions.py
+    sanity_check.py
+    export_onnx.py
+    train_lapple_colab.py   (this file)
+
+HOW TO RUN IN COLAB:
+    1. Mount Google Drive first (separate cell):
+           from google.colab import drive
+           drive.mount('/content/drive')
+    2. Attach a GPU runtime: Runtime -> Change runtime type -> T4 GPU.
+       DEVICE below is hardcoded to "cuda" -- this will crash if no GPU
+       is attached. (CPU works too if you change DEVICE to "cpu", just
+       slower.)
+    3. Upload the 8 files above into the Colab file browser (left sidebar)
+       so they sit in /content alongside each other.
+    4. In a cell:  !pip install onnx --quiet   (needed for the ONNX
+       export step at the bottom of this script; torch is already
+       preinstalled in Colab)
+    5. In a new cell:  %run train_lapple_colab.py
+       (or just paste this whole file's contents into one cell and run it)
+    6. Both output files are saved straight to your Drive root as they're
+       produced -- CHECKPOINT_PATH and ONNX_OUTPUT_PATH below both point
+       to /content/drive/MyDrive/, so there's nothing to manually
+       download from the Colab file browser:
+           cyclone_model_lapple_parametric.pth   (checkpoint — keep for
+                                                    later resume/retraining)
+           cyclone_model_lapple_parametric.onnx  (this is the file to give
+                                                    to the .NET side)
+
+AFTER TRAINING — deploying the new model:
+    1. Download cyclone_model_lapple_parametric.onnx from Drive.
+    2. Copy it into Web/Models/ in the repo.
+    3. Update Web/appsettings.json — change:
+           "LAPPLE": "cyclone_model.onnx"
+       to:
+           "LAPPLE": "cyclone_model_lapple_parametric.onnx"
+    4. On the Python service side, cyclone_model.pth is loaded via
+       _DEFAULT_CHECKPOINT_PATHS_BY_TYPE in app.py (or the
+       FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE env var if you've set one) —
+       update that mapping to point "LAPPLE" at
+       cyclone_model_lapple_parametric.pth so the async field-prediction
+       job path picks up the new parametric checkpoint too, not just the
+       ONNX preview path.
+    5. Sanity-check before trusting it, same as the other models:
+           python test_onnx_geometries.py cyclone_model_lapple_parametric.onnx
+       Look for "PASS: outputs differ meaningfully across geometries".
+"""
+from __future__ import annotations
+
+import torch
+
+from field_train import (
+    LAPPLE_RATIOS,
+    train_parametric_field_model,
+    save_parametric_field_checkpoint,
+)
+from field_physics import fluid_properties
+import export_onnx
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# CONFIG — edit these plain variables, no CLI flags needed.
+# ─────────────────────────────────────────────────────────────────────────
+
+# Same diameter/flow window used for Stairmand and Stairmand GP, so all
+# three families are directly comparable and cover the same realistic
+# range of designs your app's users will actually create. The network
+# only interpolates reliably inside this window (see
+# train_parametric_field_model's docstring in field_train.py).
+DIAMETER_MIN_MM = 150.0
+DIAMETER_MAX_MM = 750.0
+FLOW_MIN_CFM = 300.0
+FLOW_MAX_CFM = 13000.0
+
+# Operating fluid conditions assumed during training — matches the
+# Stairmand/Stairmand GP scripts. If your real designs span a wide
+# temperature/pressure/gas range, that would need its own parametric
+# input in future — out of scope here.
+OPERATING_TEMP_C = 25.0
+OPERATING_PRESS_KPA = 101.325
+GAS_TYPE = "Air"
+
+# Training run length/architecture — same defaults as the Stairmand /
+# Stairmand GP scripts. Watch the printed loss and increase epochs if it
+# hasn't flattened out by the end.
+EPOCHS = 20000
+N_INTERIOR = 2048          # PDE collocation points resampled every epoch
+HIDDEN = 64
+N_LAYERS = 6
+LR_ADAM_START = 3e-3
+LR_ADAM_END = 1e-4
+GRAD_CLIP_NORM = 1.0
+SEED = 0
+PROGRESS_EVERY = 25
+
+# "cuda" if you turned on a Colab GPU runtime, else "cpu".
+DEVICE = "cuda"
+
+# Saves an intermediate checkpoint every this-many epochs (in addition to
+# the final save at the end) so a Colab disconnect loses at most this many
+# epochs of progress, not the whole run. Set to None to disable.
+CHECKPOINT_EVERY = 2000
+
+# If you already have a partially-trained parametric Lapple checkpoint
+# (e.g. from a previous Colab session that disconnected), set this to its
+# path to continue training instead of starting over. Leave as None for a
+# fresh run. NOTE: this must be a --mode parametric checkpoint already —
+# the OLD single-geometry cyclone_model.pth cannot be resumed from here,
+# it has to be retrained from scratch (see train_parametric_field_model's
+# docstring in field_train.py for why the two checkpoint kinds aren't
+# interchangeable).
+RESUME_FROM: str | None = None
+
+# Deliberately NOT named cyclone_model.pth/.onnx — this keeps the old
+# single-geometry checkpoint intact on Drive until you've verified the
+# new parametric one works, so a bad run can't silently overwrite the
+# fallback the service is currently using.
+CHECKPOINT_PATH = "/content/drive/MyDrive/cyclone_model_lapple_parametric.pth"
+ONNX_OUTPUT_PATH = "/content/drive/MyDrive/cyclone_model_lapple_parametric.onnx"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# TRAIN
+# ─────────────────────────────────────────────────────────────────────────
+
+def _print_progress(epoch: int, total: int, loss: float) -> None:
+    if epoch == total or epoch % (PROGRESS_EVERY * 10) == 0:
+        print(f"[{epoch:>6}/{total}] loss={loss:.6e}")
+
+
+def main() -> None:
+    print(
+        f"Training Lapple (parametric) field model: "
+        f"diameter=[{DIAMETER_MIN_MM}, {DIAMETER_MAX_MM}]mm, "
+        f"flow=[{FLOW_MIN_CFM}, {FLOW_MAX_CFM}]CFM, gas={GAS_TYPE}, "
+        f"epochs={EPOCHS}, device={DEVICE}"
+    )
+    print(f"Ratios (LAPPLE_RATIOS from field_train.py): {LAPPLE_RATIOS}")
+
+    model, scaler, history = train_parametric_field_model(
+        rho_fn=fluid_properties,
+        ratios=LAPPLE_RATIOS,
+        diameter_range_m=(DIAMETER_MIN_MM * 1e-3, DIAMETER_MAX_MM * 1e-3),
+        flow_rate_range_cfm=(FLOW_MIN_CFM, FLOW_MAX_CFM),
+        operating_temp_c=OPERATING_TEMP_C,
+        operating_press_kpa=OPERATING_PRESS_KPA,
+        gas_type=GAS_TYPE,
+        epochs=EPOCHS,
+        n_interior=N_INTERIOR,
+        hidden=HIDDEN,
+        n_layers=N_LAYERS,
+        lr_start=LR_ADAM_START,
+        lr_end=LR_ADAM_END,
+        grad_clip_norm=GRAD_CLIP_NORM,
+        device=DEVICE,
+        seed=SEED,
+        on_progress=_print_progress,
+        progress_every=PROGRESS_EVERY,
+        resume_from=RESUME_FROM,
+        checkpoint_every=CHECKPOINT_EVERY,
+        checkpoint_path=CHECKPOINT_PATH,
+    )
+
+    print("\n── Training done ────────────────────────────────────────")
+    print(f"final_loss={history['final_loss']:.6e}  wall_time_s={history['wall_time_s']:.1f}")
+
+    # Final authoritative save (checkpoint_every above already saved
+    # intermediate copies during the run — this overwrites with the
+    # actually-final weights).
+    save_parametric_field_checkpoint(
+        CHECKPOINT_PATH,
+        model=model,
+        scaler=scaler,
+        ratios=LAPPLE_RATIOS,
+        operating_temp_c=OPERATING_TEMP_C,
+        operating_press_kpa=OPERATING_PRESS_KPA,
+        gas_type=GAS_TYPE,
+        hidden=history["hidden"],
+        n_layers=history["n_layers"],
+    )
+    print(f"Saved checkpoint -> {CHECKPOINT_PATH}")
+
+    # ── Export straight to ONNX in the same run — calls export_onnx.py's
+    # own export() function directly (no subprocess/CLI invocation), so
+    # there's still only one place (export_onnx.py) that knows how to
+    # build the ONNX graph.
+    export_onnx.export(CHECKPOINT_PATH, ONNX_OUTPUT_PATH)
+    print(f"Saved ONNX model -> {ONNX_OUTPUT_PATH}")
+
+    print(
+        "\nDone. Both files were saved directly to your Google Drive root:\n"
+        f"  {CHECKPOINT_PATH}   (checkpoint — keep for future resume/retraining;\n"
+        f"                        also copy alongside app.py as cyclone_model.pth,\n"
+        f"                        or update FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE /\n"
+        f"                        _DEFAULT_CHECKPOINT_PATHS_BY_TYPE in app.py, so the\n"
+        f"                        async field-prediction job path uses it too)\n"
+        f"  {ONNX_OUTPUT_PATH}  (give this one to the .NET side — it goes in\n"
+        f"                        Web/Models/ and gets wired up via\n"
+        f"                        CyclonePredictionService:OnnxModelPathsByType ->\n"
+        f"                        LAPPLE in appsettings.json)"
+    )
+
+
+if __name__ == "__main__":
+    main()
