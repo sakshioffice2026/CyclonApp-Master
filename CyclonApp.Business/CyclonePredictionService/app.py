@@ -124,6 +124,7 @@ _DEFAULT_CHECKPOINT_PATHS_BY_TYPE = {
     "LAPPLE": "cyclone_model.pth",
     "STAIRMAND": "cyclone_model_stairmand.pth",
     "STAIRMAND_GP": "cyclone_model_stairmand_gp.pth",
+    "SWIFT_HE": "cyclone_model_swift_he.pth",
 }
 
 def _load_checkpoint_paths_by_type() -> dict[str, str]:

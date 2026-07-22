@@ -908,6 +908,37 @@ STAIRMAND_GP_RATIOS: dict[str, float] = {
     "ExhaustLengthRatio": 0.50,
 }
 
+# Swift High-Efficiency (Swift HE) proportions (dimension / barrel diameter
+# D). Published Swift ratios vary more across references than Stairmand's
+# do, so treat this dict even more strongly as a placeholder than the ones
+# above:
+#   Inlet height             a  = 0.44 D  -> InletHeightRatio
+#   Inlet width              b  = 0.21 D  -> InletWidthRatio
+#   Cylinder (barrel) height h  ~ 1.50 D  -> BarrelHeightRatio
+#   Cone height               Hc ~ 2.50 D  -> ConeHeightRatio
+#   Vortex-finder diameter    De = 0.40-0.50 D -> OutletDiamRatio (using the
+#                                                 0.45 D midpoint here)
+#   Dust outlet diameter      B  ~ 0.35 D  -> BottomOutletRatio
+#
+# ExhaustLengthRatio (vortex-finder length S) has NO documented Swift-HE
+# figure in the source material this was transcribed from — there is no
+# "0.44 D inlet height" style citation for it. Reusing the Stairmand-family
+# value (0.50 D) here ONLY as a placeholder so this module stays runnable
+# standalone. Before a production training run: (1) pull the actual
+# "SWIFT_HE" row's ratios from the CycloneType DB table (see SeedData.cs)
+# instead of trusting this dict, and (2) confirm ExhaustLengthRatio against
+# a primary Swift geometry reference rather than leaving the Stairmand
+# borrow in place.
+SWIFT_HE_RATIOS: dict[str, float] = {
+    "InletHeightRatio": 0.44,
+    "InletWidthRatio": 0.21,
+    "BarrelHeightRatio": 1.50,
+    "ConeHeightRatio": 2.50,
+    "OutletDiamRatio": 0.45,
+    "BottomOutletRatio": 0.35,
+    "ExhaustLengthRatio": 0.50,
+}
+
 
 
 def geometry_mm_from_diameter(

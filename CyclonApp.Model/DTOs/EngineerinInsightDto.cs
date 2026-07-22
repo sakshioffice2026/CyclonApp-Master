@@ -64,5 +64,35 @@ namespace CyclonApp.Model.DTOs
         /// <summary>Whether this design/result is ready to move forward on
         /// as-is (no Critical issues and physics validation passed).</summary>
         public bool ReadyToProceed { get; set; }
-    }
+    
+
+        /// <summary>
+        /// Everything IEngineeringInsight.GenerateReport needs to produce a
+        /// type-aware, evidence-based report. Replaces the old two-parameter
+        /// signature (FieldResultDto, double? knownEfficiencyPercent), which
+        /// had no way to know which cyclone type it was evaluating and threw
+        /// away everything from the standard calculation except one number.
+        /// </summary>
+
+            /// <summary>Field-solve output: velocity/pressure grid, rho, nu,
+            /// vInlet, and mass-conservation diagnostics.</summary>
+            public FieldResultDto Result { get; set; } = new();
+
+            /// <summary>e.g. "LAPPLE", "STAIRMAND_HE" — selects which
+            /// threshold set EvaluatePressureDrop/EvaluateSwirlStrength/
+            /// EvaluateWallVelocity judge this run against. Required: without
+            /// this, every cyclone type is judged against the same fixed
+            /// bands, which is the root cause of near-identical insights
+            /// across different designs.</summary>
+            public string CycloneTypeCode { get; set; } = string.Empty;
+
+            /// <summary>The standard Lapple-model calculation for this
+            /// revision (cut size, efficiency, inlet velocity, gas viscosity/
+            /// density, etc.), when it has been run. Null only if the field
+            /// solve was triggered before the standard calculation — the
+            /// engine should degrade gracefully (skip cut-size/Reynolds-based
+            /// insights, don't fabricate them) rather than fail.</summary>
+            public CyclonOutputDto? StandardCalculation { get; set; }
+        }
+    
 }

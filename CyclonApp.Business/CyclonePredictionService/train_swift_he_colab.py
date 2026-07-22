@@ -1,0 +1,205 @@
+"""
+train_swift_he_colab.py
+────────────────────────
+Run this top-to-bottom in a Google Colab notebook to train the Swift
+High-Efficiency (Swift HE) cyclone field model. No command-line flags —
+every setting is a plain variable in the CONFIG section below.
+
+This mirrors train_stairmand_gp_colab.py exactly, swapped to the Swift HE
+ratio family: it imports SWIFT_HE_RATIOS and train_parametric_field_model /
+save_parametric_field_checkpoint straight from field_train.py, which is
+still the single source of truth for every cyclone family (Lapple,
+Stairmand HE, Stairmand GP, Swift HE). This script is only a convenience
+wrapper around it for Colab.
+
+BEFORE YOU RUN THIS: SWIFT_HE_RATIOS in field_train.py is flagged there as
+a placeholder — published Swift geometry ratios vary more across
+references than Stairmand's do, and one of the seven ratios
+(ExhaustLengthRatio) has no documented Swift-specific figure in the source
+material it was transcribed from. Pull the authoritative "SWIFT_HE" row
+from the CycloneType DB table (see SeedData.cs) and update
+SWIFT_HE_RATIOS in field_train.py FIRST if that row differs from the
+placeholder — otherwise this trains a network for a geometry that doesn't
+match what CyclonCalculationRepository computes analytically for the same
+type code, which would make the "indicative only" trusted-range check
+meaningless (see README.md).
+
+WHAT YOU NEED IN THE COLAB SESSION (same folder, upload all of them):
+    field_train.py             (must already contain SWIFT_HE_RATIOS —
+                                 see field_train.py comments)
+    field_model.py
+    field_physics.py
+    field_turbulence.py
+    field_boundary_conditions.py
+    sanity_check.py
+    export_onnx.py
+    train_swift_he_colab.py    (this file)
+
+HOW TO RUN IN COLAB:
+    1. Runtime -> Change runtime type -> GPU (optional but faster; CPU
+       works fine too, this network is small).
+    2. Mount Google Drive first (separate cell):
+           from google.colab import drive
+           drive.mount('/content/drive')
+    3. Attach a GPU runtime: Runtime -> Change runtime type -> T4 GPU.
+       DEVICE below is hardcoded to "cuda" -- this will crash if no GPU
+       is attached.
+    4. Upload the 8 files above into the Colab file browser (left sidebar)
+       so they sit in /content alongside each other.
+    5. In a cell:  !pip install onnx --quiet   (needed for the ONNX
+       export step at the bottom of this script; torch is already
+       preinstalled in Colab)
+    6. In a new cell:  %run train_swift_he_colab.py
+       (or just paste this whole file's contents into one cell and run it)
+    7. Both output files are saved straight to your Drive root as they're
+       produced -- CHECKPOINT_PATH and ONNX_OUTPUT_PATH below both point
+       to /content/drive/MyDrive/, so there's nothing to manually
+       download from the Colab file browser:
+           cyclone_model_swift_he.pth    (checkpoint — keep for later
+                                           resume/retraining)
+           cyclone_model_swift_he.onnx   (this is the file to give to
+                                           the .NET side)
+"""
+from __future__ import annotations
+
+import torch
+
+from field_train import (
+    SWIFT_HE_RATIOS,
+    train_parametric_field_model,
+    save_parametric_field_checkpoint,
+)
+from field_physics import fluid_properties
+import export_onnx
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# CONFIG — edit these plain variables, no CLI flags needed.
+# ─────────────────────────────────────────────────────────────────────────
+
+# Family of Swift-HE-shaped cyclone sizes/flow rates this ONE network will
+# learn to cover. Kept identical to the Lapple/Stairmand-HE/GP parametric
+# windows so all four families stay directly comparable in the app. Narrow
+# this if your real Swift HE designs only ever fall inside a smaller
+# sub-range.
+DIAMETER_MIN_MM = 150.0
+DIAMETER_MAX_MM = 750.0
+FLOW_MIN_CFM = 300.0
+FLOW_MAX_CFM = 13000.0
+
+# Operating fluid conditions assumed during training. Matches the other
+# family Colab scripts — out of scope to make this multi-condition on this
+# first Swift HE pass.
+OPERATING_TEMP_C = 25.0
+OPERATING_PRESS_KPA = 101.325
+GAS_TYPE = "Air"
+
+# Training run length/architecture — same defaults as the other family
+# Colab scripts.
+EPOCHS = 20000
+N_INTERIOR = 2048          # PDE collocation points resampled every epoch
+HIDDEN = 64
+N_LAYERS = 6
+LR_ADAM_START = 3e-3
+LR_ADAM_END = 1e-4
+GRAD_CLIP_NORM = 1.0
+SEED = 0
+PROGRESS_EVERY = 25
+
+# "cuda" if you turned on a Colab GPU runtime, else "cpu".
+DEVICE = "cuda"
+
+# Saves an intermediate checkpoint every this-many epochs (in addition to
+# the final save at the end) so a Colab disconnect loses at most this many
+# epochs of progress, not the whole run. Set to None to disable.
+CHECKPOINT_EVERY = 2000
+
+# If you already have a partially-trained Swift HE checkpoint (e.g. from a
+# previous Colab session that disconnected), set this to its path to
+# continue training instead of starting over. Leave as None for a fresh run.
+RESUME_FROM: str | None = None
+
+CHECKPOINT_PATH = "/content/drive/MyDrive/cyclone_model_swift_he.pth"
+ONNX_OUTPUT_PATH = "/content/drive/MyDrive/cyclone_model_swift_he.onnx"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# TRAIN
+# ─────────────────────────────────────────────────────────────────────────
+
+def _print_progress(epoch: int, total: int, loss: float) -> None:
+    if epoch == total or epoch % (PROGRESS_EVERY * 10) == 0:
+        print(f"[{epoch:>6}/{total}] loss={loss:.6e}")
+
+
+def main() -> None:
+    print(
+        f"Training Swift HE field model: "
+        f"diameter=[{DIAMETER_MIN_MM}, {DIAMETER_MAX_MM}]mm, "
+        f"flow=[{FLOW_MIN_CFM}, {FLOW_MAX_CFM}]CFM, gas={GAS_TYPE}, "
+        f"epochs={EPOCHS}, device={DEVICE}"
+    )
+    print(f"Ratios (SWIFT_HE_RATIOS from field_train.py): {SWIFT_HE_RATIOS}")
+
+    model, scaler, history = train_parametric_field_model(
+        rho_fn=fluid_properties,
+        ratios=SWIFT_HE_RATIOS,
+        diameter_range_m=(DIAMETER_MIN_MM * 1e-3, DIAMETER_MAX_MM * 1e-3),
+        flow_rate_range_cfm=(FLOW_MIN_CFM, FLOW_MAX_CFM),
+        operating_temp_c=OPERATING_TEMP_C,
+        operating_press_kpa=OPERATING_PRESS_KPA,
+        gas_type=GAS_TYPE,
+        epochs=EPOCHS,
+        n_interior=N_INTERIOR,
+        hidden=HIDDEN,
+        n_layers=N_LAYERS,
+        lr_start=LR_ADAM_START,
+        lr_end=LR_ADAM_END,
+        grad_clip_norm=GRAD_CLIP_NORM,
+        device=DEVICE,
+        seed=SEED,
+        on_progress=_print_progress,
+        progress_every=PROGRESS_EVERY,
+        resume_from=RESUME_FROM,
+        checkpoint_every=CHECKPOINT_EVERY,
+        checkpoint_path=CHECKPOINT_PATH,
+    )
+
+    print("\n── Training done ────────────────────────────────────────")
+    print(f"final_loss={history['final_loss']:.6e}  wall_time_s={history['wall_time_s']:.1f}")
+
+    # Final authoritative save (checkpoint_every above already saved
+    # intermediate copies during the run — this overwrites with the
+    # actually-final weights).
+    save_parametric_field_checkpoint(
+        CHECKPOINT_PATH,
+        model=model,
+        scaler=scaler,
+        ratios=SWIFT_HE_RATIOS,
+        operating_temp_c=OPERATING_TEMP_C,
+        operating_press_kpa=OPERATING_PRESS_KPA,
+        gas_type=GAS_TYPE,
+        hidden=history["hidden"],
+        n_layers=history["n_layers"],
+    )
+    print(f"Saved checkpoint -> {CHECKPOINT_PATH}")
+
+    # ── Export straight to ONNX in the same run — calls export_onnx.py's
+    # own export() function directly (no subprocess/CLI invocation), so
+    # there's still only one place (export_onnx.py) that knows how to
+    # build the ONNX graph.
+    export_onnx.export(CHECKPOINT_PATH, ONNX_OUTPUT_PATH)
+    print(f"Saved ONNX model -> {ONNX_OUTPUT_PATH}")
+
+    print(
+        "\nDone. Both files were saved directly to your Google Drive root:\n"
+        f"  {CHECKPOINT_PATH}   (keep for future resume/retraining)\n"
+        f"  {ONNX_OUTPUT_PATH}  (give this one to the .NET side — it goes "
+        f"in Web/Models/ and gets wired up via "
+        f"CyclonePredictionService:OnnxModelPathsByType -> SWIFT_HE in "
+        f"appsettings.json)"
+    )
+
+
+if __name__ == "__main__":
+    main()

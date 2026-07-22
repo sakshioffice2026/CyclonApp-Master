@@ -57,7 +57,8 @@ namespace CyclonApp.Database
         // .ParseRatios deserializes straight into that DTO.
         //
         // These values must stay in lockstep with LAPPLE_RATIOS /
-        // STAIRMAND_RATIOS in CyclonApp.Business/CyclonePredictionService/
+        // STAIRMAND_RATIOS / STAIRMAND_GP_RATIOS / SWIFT_HE_RATIOS in
+        // CyclonApp.Business/CyclonePredictionService/
         // field_train.py — that file trains the ONNX field model against
         // whichever ratios are used there, and this seed defines the ratios
         // the deterministic Lapple/Shepherd-Lapple calculation
@@ -143,6 +144,39 @@ namespace CyclonApp.Database
                                        "of bag filters or scrubbers.",
                     IsActive = true,
                     SortOrder = 3,
+                });
+            }
+
+            if (!await db.CycloneTypes.AnyAsync(t => t.Code == "SWIFT_HE"))
+            {
+                db.CycloneTypes.Add(new CycloneType
+                {
+                    Code = "SWIFT_HE",
+                    Name = "Swift High Efficiency (Swift HE)",
+                    Description = "Standardized reverse-flow geometry aimed at very high " +
+                                   "fine-particle collection via a longer body/cone and longer " +
+                                   "residence time than Stairmand HE, at the cost of a higher " +
+                                   "pressure drop. Published Swift ratios vary more across " +
+                                   "references than Stairmand's do -- verify these against a " +
+                                   "primary source before relying on them for a real design; " +
+                                   "in particular ExhaustLengthRatio below has no directly " +
+                                   "documented Swift-specific figure and currently reuses the " +
+                                   "Stairmand-family value as a placeholder.",
+                    DimensionRatiosJson = BuildRatiosJson(
+                        inletHeightRatio: 0.44,
+                        inletWidthRatio: 0.21,
+                        barrelHeightRatio: 1.50,
+                        coneHeightRatio: 2.50,
+                        outletDiamRatio: 0.45,
+                        bottomOutletRatio: 0.35,
+                        exhaustLengthRatio: 0.50),
+                    DefaultEffectiveTurns = 6,
+                    ApplicationNote = "Fine powder handling, chemical processing, pharmaceutical " +
+                                      "dust collection, mineral processing, and high-efficiency " +
+                                      "pre-separation ahead of filters where Stairmand HE isn't " +
+                                      "quite enough and the extra pressure drop is acceptable.",
+                    IsActive = true,
+                    SortOrder = 4,
                 });
             }
 
