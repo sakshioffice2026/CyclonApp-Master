@@ -16,7 +16,9 @@ only prediction contract this service serves.
 
 CONTRACT (field-solving model):
     POST {base_url}/predict_field/start
-    body: PredictFieldStartRequest (geometry in mm + process conditions)
+    body: PredictFieldStartRequest (geometry in mm + process conditions
+          + CycloneTypeCode, e.g. "LAPPLE"/"STAIRMAND" — selects which
+          trained checkpoint answers the request)
     response: PredictFieldStartResponse (JobId, Status="running")
 
     GET {base_url}/predict_field/status/{job_id}
@@ -60,6 +62,7 @@ Run:
     uvicorn app:app --host 0.0.0.0 --port 8000
 """
 from __future__ import annotations
+import json
 import math
 import threading
 import time
@@ -94,35 +97,62 @@ FIELD_JOB_TTL_SECONDS = 3600  # finished jobs are swept 1 hour after completion
 FIELD_JOB_SWEEP_INTERVAL_SECONDS = 300
 
 # ─────────────────────────────────────────────────────────────────────────
-# PRODUCTION INFERENCE MODE — train once (e.g. in Colab via
-# field_train.train_parametric_field_model, saved the same way
-# save_field_checkpoint does), deploy the checkpoint alongside this
-# service, load it once at startup, and serve every request from the
-# already-trained weights. No training happens after deploy.
+# PRODUCTION INFERENCE MODE — train once per cyclone family (e.g. in Colab
+# via field_train.train_parametric_field_model, saved the same way
+# save_parametric_field_checkpoint does), deploy each family's checkpoint
+# alongside this service, and serve every request from the already-trained
+# weights for the type it asks for. No training happens after deploy.
 #
-# ROOT-CAUSE FIX (this revision): CycloneFieldPINN takes diameter_m/
-# flow_rate_cfm as EXPLICIT network inputs, not baked-in constants (see
-# field_model.py module docstring) — the checkpoint loaded here is the
-# parametric model trained across a whole LAPPLE size/flow-rate family via
-# train_parametric_field_model, not a single-geometry model. Previously
-# _run_field_job ignored the incoming request and always evaluated
-# state["geometry"]/state["flow_rate_cfm"] (the network's last training
-# scale, kept around only for FieldScaler bookkeeping) — every request
-# returned the exact same field regardless of what geometry was asked for.
-# Fixed below: _run_field_job now builds geometry/fluid/inlet/turbulence
-# quantities from the REQUEST'S OWN fields (same glue
-# field_train.run_field_prediction_job uses) and evaluates the network at
-# the request's actual diameter_m/flow_rate_cfm. state["model"] supplies
-# the trained weights; state["scaler"].D_min/D_max/Q_min/Q_max supply the
-# fixed parametric normalization window the network was trained with
-# (must not be recomputed per request — see FieldScaler.with_scales
-# docstring); everything else in state is unused by the live path now.
+# ROOT-CAUSE FIX (this revision): previously this service loaded exactly
+# ONE checkpoint at startup (FIELD_MODEL_CHECKPOINT_PATH, a single global
+# path) and used it for every request regardless of which cyclone type the
+# request was actually for — a Stairmand request would silently be
+# answered by the LAPPLE-trained network (or vice versa), which is pure
+# extrapolation onto a completely different family's geometry ratios, not
+# a validated prediction. That's why every request could come back with
+# the same "mass conservation failed" result: the model being queried
+# genuinely didn't know that shape.
+#
+# Fixed below: requests now carry CycloneTypeCode (e.g. "LAPPLE",
+# "STAIRMAND"), and this service keeps one loaded checkpoint per type,
+# loaded lazily on first request and cached after that — the same
+# resolve-by-type-code-then-cache pattern
+# CycloneFieldOnnxPredictorProvider.cs already uses on the C# ONNX-preview
+# side, so both inference paths pick the model the same way.
 # ─────────────────────────────────────────────────────────────────────────
-FIELD_MODEL_CHECKPOINT_PATH = os.environ.get(
-    "FIELD_MODEL_CHECKPOINT_PATH", "cyclone_model.pth"
-)
+_DEFAULT_CHECKPOINT_PATHS_BY_TYPE = {
+    "LAPPLE": "cyclone_model.pth",
+    "STAIRMAND": "cyclone_model_stairmand.pth",
+}
 
-_inference_state: Optional[dict] = None  # populated by _load_field_checkpoint()
+def _load_checkpoint_paths_by_type() -> dict[str, str]:
+    """FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE, if set, must be a JSON object
+    string, e.g. '{"LAPPLE": "cyclone_model.pth", "STAIRMAND": "cyclone_model_stairmand.pth"}'.
+    Falls back to _DEFAULT_CHECKPOINT_PATHS_BY_TYPE (and prints a warning)
+    if the env var is unset, empty, or not valid JSON, so a misconfigured
+    deployment still starts up rather than crashing on the first request."""
+    raw = os.environ.get("FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE")
+    if not raw:
+        return dict(_DEFAULT_CHECKPOINT_PATHS_BY_TYPE)
+    try:
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict) or not parsed:
+            raise ValueError("must be a non-empty JSON object")
+        return {str(k).upper(): str(v) for k, v in parsed.items()}
+    except Exception as e:
+        print(f"[startup] WARNING: FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE is set "
+              f"but could not be parsed ({e}) — falling back to the built-in "
+              f"default mapping: {_DEFAULT_CHECKPOINT_PATHS_BY_TYPE}")
+        return dict(_DEFAULT_CHECKPOINT_PATHS_BY_TYPE)
+
+
+FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE = _load_checkpoint_paths_by_type()
+
+# One entry per cyclone type, populated lazily on first request for that
+# type (see _get_inference_state) and reused after that — mirrors
+# CycloneFieldOnnxPredictorProvider's ConcurrentDictionary cache.
+_inference_states: dict[str, dict] = {}
+_inference_states_lock = threading.Lock()
 
 
 def _load_field_checkpoint(path: str) -> dict:
@@ -171,12 +201,56 @@ def _load_field_checkpoint(path: str) -> dict:
         return {"model": model, "scaler": scaler}
 
 
+def _get_inference_state(cyclone_type_code: str) -> dict:
+    """Resolves the loaded {"model", "scaler"} state for a cyclone type
+    code, loading and caching it on first use. Falls back to LAPPLE (the
+    first entry in FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE) with a loud
+    warning if the requested type has no configured checkpoint path yet,
+    rather than silently answering with whatever type happened to load
+    first — that silent-fallback behavior is exactly the bug this fix
+    replaces."""
+    key = (cyclone_type_code or "").strip().upper()
+
+    with _inference_states_lock:
+        if key in _inference_states:
+            return _inference_states[key]
+
+        path = FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE.get(key)
+        if path is None:
+            fallback_key = next(iter(FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE))
+            print(f"[predict_field] WARNING: no checkpoint configured for "
+                  f"cyclone type '{cyclone_type_code}' — falling back to "
+                  f"'{fallback_key}'. Predictions will be for the wrong "
+                  f"cyclone family's shape. Add an entry to "
+                  f"FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE once this type has "
+                  f"been trained.")
+            if fallback_key in _inference_states:
+                return _inference_states[fallback_key]
+            path = FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE[fallback_key]
+            key = fallback_key
+
+        state = _load_field_checkpoint(path)
+        _inference_states[key] = state
+        print(f"[predict_field] Loaded inference-only field model for "
+              f"'{key}' from {path}")
+        return state
+
+
 @app.on_event("startup")
-def load_field_model_checkpoint():
-    global _inference_state
-    _inference_state = _load_field_checkpoint(FIELD_MODEL_CHECKPOINT_PATH)
-    print(f"[startup] Loaded inference-only field model from "
-          f"{FIELD_MODEL_CHECKPOINT_PATH}")
+def load_field_model_checkpoints():
+    """Eagerly loads every configured type's checkpoint at startup (rather
+    than waiting for the first request) so a missing/corrupt file is
+    caught immediately in the logs, not on some later request. A type
+    failing to load here does not stop the others or crash the service —
+    it's just unavailable until fixed, same as if it had never been
+    configured."""
+    for key, path in FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE.items():
+        try:
+            _get_inference_state(key)
+        except Exception as e:
+            print(f"[startup] WARNING: failed to load checkpoint for "
+                  f"'{key}' from '{path}': {e}. Requests for this cyclone "
+                  f"type will fail (or fall back) until this is fixed.")
 
 
 @app.get("/health")
@@ -206,6 +280,13 @@ class PredictFieldStartRequest(BaseModel):
     operating_temp_c: float = Field(alias="OperatingTempC", default=25.0)
     operating_press_kpa: float = Field(alias="OperatingPressKPa", default=101.325)
     gas_type: str = Field(alias="GasType", default="Air")
+
+    # Selects which trained checkpoint answers this request — see
+    # PRODUCTION INFERENCE MODE note above. Defaults to "LAPPLE" only for
+    # backward compatibility with any caller that predates this field;
+    # every current caller (CyclonePredictionRepository.StartFieldPredictionAsync)
+    # sends the design's actual CycloneType.Code explicitly.
+    cyclone_type_code: str = Field(alias="CycloneTypeCode", default="LAPPLE")
 
 
 class PredictFieldStartResponse(BaseModel):
@@ -261,7 +342,7 @@ FIELD_JOB_EPOCHS_ADAM = 5
 FIELD_JOB_EPOCHS_LBFGS = 2
 
 
-def _warn_if_request_outside_trained_range(req: PredictFieldStartRequest) -> None:
+def _warn_if_request_outside_trained_range(req: PredictFieldStartRequest, state: dict) -> None:
     """The parametric checkpoint was trained across a diameter/flow-rate
     window (state["scaler"].D_min/D_max/Q_min/Q_max — see
     train_parametric_field_model). A request inside that window is
@@ -270,7 +351,7 @@ def _warn_if_request_outside_trained_range(req: PredictFieldStartRequest) -> Non
     request (429/422 are for auth/format errors, not this), it only makes
     an out-of-range design visible in logs rather than silently trusting an
     unvalidated network output."""
-    scaler = _inference_state["scaler"]
+    scaler = state["scaler"]
     diameter_m = req.barrel_diameter_mm * 1e-3
     if not (scaler.D_min <= diameter_m <= scaler.D_max):
         print(
@@ -291,7 +372,12 @@ def _warn_if_request_outside_trained_range(req: PredictFieldStartRequest) -> Non
 def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
     global _field_jobs_running_count
     try:
-        _warn_if_request_outside_trained_range(req)
+        # Resolves to the checkpoint trained for THIS request's cyclone
+        # family (see PRODUCTION INFERENCE MODE note above) — no longer a
+        # single global state used for every type.
+        state = _get_inference_state(req.cyclone_type_code)
+
+        _warn_if_request_outside_trained_range(req, state)
 
         # INFERENCE ONLY — no training here. state["model"] supplies the
         # trained weights; everything below this line is request-specific
@@ -299,7 +385,6 @@ def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
         # fluid properties -> inlet velocity -> inlet turbulence pipeline),
         # so the network is actually queried at the design that was asked
         # for, not the checkpoint's last-trained scale.
-        state = _inference_state
 
         geometry = geometry_from_dimensions_mm(
             barrel_diameter_mm=req.barrel_diameter_mm,

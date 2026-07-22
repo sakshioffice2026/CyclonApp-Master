@@ -118,8 +118,40 @@ namespace CyclonApp.Database
                 });
             }
 
+            if (!await db.CycloneTypes.AnyAsync(t => t.Code == "STAIRMAND_GP"))
+            {
+                db.CycloneTypes.Add(new CycloneType
+                {
+                    Code = "STAIRMAND_GP",
+                    Name = "Stairmand General Purpose (GP)",
+                    Description = "Lower-pressure-drop variant of Stairmand's proportions, " +
+                                   "using a wider inlet than the High Efficiency (HE) design " +
+                                   "to trade some fine-particle collection efficiency for " +
+                                   "reduced fan power and operating cost.",
+                    DimensionRatiosJson = BuildRatiosJson(
+                        inletHeightRatio: 0.50,
+                        inletWidthRatio: 0.25,
+                        barrelHeightRatio: 1.50,
+                        coneHeightRatio: 2.50,
+                        outletDiamRatio: 0.50,
+                        bottomOutletRatio: 0.375,
+                        exhaustLengthRatio: 0.50),
+                    DefaultEffectiveTurns = 6,
+                    ApplicationNote = "Woodworking dust collection, grain handling, foundries, " +
+                                       "coarser cement handling, material transfer systems, " +
+                                       "general industrial ventilation, and pre-cleaners ahead " +
+                                       "of bag filters or scrubbers.",
+                    IsActive = true,
+                    SortOrder = 3,
+                });
+            }
+
+
+
             await db.SaveChangesAsync();
         }
+
+
 
         private static string BuildRatiosJson(
             double inletHeightRatio,

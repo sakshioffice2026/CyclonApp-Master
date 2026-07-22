@@ -66,6 +66,24 @@ namespace CyclonApp.Repositories.Repositories
             var client = _httpClientFactory.CreateClient("CyclonePrediction");
             client.BaseAddress = new Uri(_baseUrl);
 
+            // ROOT-CAUSE FIX: the Python field-solving service keeps one
+            // trained model PER cyclone type and picks between them using
+            // this code (see app.py's PRODUCTION INFERENCE MODE note) —
+            // previously this wasn't sent at all, so every request (LAPPLE,
+            // STAIRMAND, whatever the design actually was) was silently
+            // answered by whichever single checkpoint the service happened
+            // to have loaded, which is why results looked the same/wrong
+            // regardless of what was actually being designed. Falls back to
+            // "LAPPLE" only if the navigation properties are somehow missing
+            // (shouldn't happen — GetRevisionWithDetailsAsync always
+            // includes CycloneDesign.CycloneType — but this must never throw
+            // a NullReferenceException here).
+            var cycloneTypeCode = input.CycloneDesign?.CycloneType?.Code;
+            if (string.IsNullOrWhiteSpace(cycloneTypeCode))
+            {
+                cycloneTypeCode = "LAPPLE";
+            }
+
             var request = new PredictFieldStartRequest
             {
                 BarrelDiameterMm = dimensions.BarrelDiameterMm,
@@ -84,7 +102,8 @@ namespace CyclonApp.Repositories.Repositories
                 // default never applies to a row already sitting in the DB
                 // with GasType = NULL — sending that through as JSON null was
                 // failing Pydantic validation (422) before this guard.
-                GasType = string.IsNullOrWhiteSpace(input.GasType) ? "Air" : input.GasType
+                GasType = string.IsNullOrWhiteSpace(input.GasType) ? "Air" : input.GasType,
+                CycloneTypeCode = cycloneTypeCode
             };
 
             var response = await client.PostAsJsonAsync("/predict_field/start", request, OutgoingJsonOptions);
@@ -216,6 +235,11 @@ namespace CyclonApp.Repositories.Repositories
             public double OperatingTempC { get; set; } = 25.0;
             public double OperatingPressKPa { get; set; } = 101.325;
             public string GasType { get; set; } = "Air";
+
+            // Selects which trained checkpoint the Python service answers
+            // this request with (e.g. "LAPPLE", "STAIRMAND") — see app.py's
+            // PRODUCTION INFERENCE MODE note.
+            public string CycloneTypeCode { get; set; } = "LAPPLE";
         }
 
         private class PredictFieldStartResponse

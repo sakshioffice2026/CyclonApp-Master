@@ -354,31 +354,58 @@ namespace CyclonApp.Repositories.Repositories
 
         private EngineeringInsightDto EvaluateMassConservation(FieldResultDto result)
         {
-            bool passed = string.Equals(result.MassConservationStatus, "ok", StringComparison.OrdinalIgnoreCase);
-            bool isWarningStatus = string.Equals(result.MassConservationStatus, "warning", StringComparison.OrdinalIgnoreCase);
+            // ROOT-CAUSE FIX: this used to re-judge Critical/Warning/Good by
+            // comparing the raw spread number against ITS OWN thresholds
+            // (Thresholds.MassFlowSpreadWarning/Critical = 0.15/0.30) —
+            // different cutoffs from the ones the Python service actually
+            // used to decide MassConservationStatus in the first place
+            // (sanity_check.py: warning >0.2, failed >0.5). The two systems
+            // could disagree: a 34.5% spread was "warning" by Python's own
+            // check (MassConservationPassed stayed true) but "Critical" by
+            // this class's separate 30% line — so that run showed a
+            // Critical card next to a Conclusion verdict that still treated
+            // physics as passed. A 63.1% spread crossed BOTH lines, so that
+            // run's Conclusion used a different wording branch entirely —
+            // making two failing runs look inconsistently reported for no
+            // real reason.
+            //
+            // Fixed: severity here is read directly from
+            // MassConservationStatus — the single value the Python physics
+            // check produced — never re-derived from a second, competing
+            // numeric threshold. One source of truth; this card and the
+            // overall Conclusion (which reads the same status via
+            // MassConservationPassed) can no longer disagree about the
+            // same run.
             double spread = result.MassFlowSpread ?? 0.0;
+            string spreadPercentText = (spread * 100.0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + "%";
 
-            if ((!passed && !isWarningStatus) || spread >= Thresholds.MassFlowSpreadCritical)
+            bool isOk = string.Equals(result.MassConservationStatus, "ok", StringComparison.OrdinalIgnoreCase);
+            bool isWarning = string.Equals(result.MassConservationStatus, "warning", StringComparison.OrdinalIgnoreCase);
+            // Anything that isn't explicitly "ok" or "warning" — including
+            // "failed" and "unknown" — is treated as Critical here, matching
+            // PhysicsValidationDto.MassConservationPassed's own definition
+            // (!= "failed") and staying on the conservative side for any
+            // status value neither side has seen before.
 
-            
+            if (isOk)
             {
                 return new EngineeringInsightDto
                 {
                     Category = "Mass Conservation",
-                    Severity = InsightSeverity.Critical,
-                    WhatHappened = "The simulated flow field did not conserve mass within an acceptable tolerance.",
-                    Why = "The underlying physics solve has not converged to a physically consistent flow field.",
-                    Impact = new List<string> { "Dust carryover may increase", "Product recovery may decrease", "Other results in this report are less trustworthy" },
-                    Recommendation = "Re-run the simulation; if this persists, review training configuration before trusting other results."
+                    Severity = InsightSeverity.Good,
+                    WhatHappened = $"Mass conservation passed with low spread across the flow field ({spreadPercentText} variation in volumetric flow across the barrel mid-section).",
+                    Why = "The physics solve converged to a consistent flow field.",
+                    Impact = new List<string> { "Simulation results are reliable" },
+                    Recommendation = "No action needed."
                 };
             }
-            if (spread >= Thresholds.MassFlowSpreadWarning)
+            if (isWarning)
             {
                 return new EngineeringInsightDto
                 {
                     Category = "Mass Conservation",
                     Severity = InsightSeverity.Warning,
-                    WhatHappened = "Mass conservation passed, but with some spread across the flow field.",
+                    WhatHappened = $"Mass conservation passed, but with some spread across the flow field ({spreadPercentText} variation in volumetric flow across the barrel mid-section).",
                     Why = "Minor numerical variation in the physics solve.",
                     Impact = new List<string> { "Small uncertainty in separation efficiency estimates" },
                     Recommendation = "Results are usable; consider a longer training run for higher confidence."
@@ -387,11 +414,11 @@ namespace CyclonApp.Repositories.Repositories
             return new EngineeringInsightDto
             {
                 Category = "Mass Conservation",
-                Severity = InsightSeverity.Good,
-                WhatHappened = "Mass conservation passed with low spread across the flow field.",
-                Why = "The physics solve converged to a consistent flow field.",
-                Impact = new List<string> { "Simulation results are reliable" },
-                Recommendation = "No action needed."
+                Severity = InsightSeverity.Critical,
+                WhatHappened = $"The simulated flow field did not conserve mass within an acceptable tolerance (volumetric flow varied by {spreadPercentText} across the barrel mid-section).",
+                Why = "The underlying physics solve has not converged to a physically consistent flow field.",
+                Impact = new List<string> { "Dust carryover may increase", "Product recovery may decrease", "Other results in this report are less trustworthy" },
+                Recommendation = "Re-run the simulation; if this persists, review training configuration before trusting other results."
             };
         }
 

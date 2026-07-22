@@ -890,6 +890,25 @@ STAIRMAND_RATIOS: dict[str, float] = {
     "ExhaustLengthRatio": 0.50,
 }
 
+# Standard Stairmand General-Purpose (GP) proportions. Lower pressure drop
+# than HE via a wider inlet, at the cost of coarser cut size.
+# NOTE: this repo's HE ratios already use BarrelHeightRatio=1.50 /
+# ConeHeightRatio=2.50 — identical to what's used below for GP, with only
+# InletWidthRatio differing (0.20 HE vs 0.25 GP). Verify this against a
+# primary Stairmand reference before trusting it for a real training run;
+# some published GP tables also widen the barrel/cone dimensions relative
+# to HE, which this set does not.
+STAIRMAND_GP_RATIOS: dict[str, float] = {
+    "InletHeightRatio": 0.50,
+    "InletWidthRatio": 0.25,
+    "BarrelHeightRatio": 1.50,
+    "ConeHeightRatio": 2.50,
+    "OutletDiamRatio": 0.50,
+    "BottomOutletRatio": 0.375,
+    "ExhaustLengthRatio": 0.50,
+}
+
+
 
 def geometry_mm_from_diameter(
     barrel_diameter_mm: float, ratios: dict[str, float],
