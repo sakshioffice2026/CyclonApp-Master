@@ -226,11 +226,24 @@ def compute_pressure_drop(
 	max(pressure_pa) - min(pressure_pa) over the whole grid, which mostly
 	measures the radial (centrifugal) pressure spread -- high at the
 	outer wall, low in the vortex core -- rather than the axial
-	inlet-to-outlet loss. That mismatch is a likely explanation for a
-	*consistent* offset between field-solve and baseline pressure drop
-	across many designs (both scale with rho*v_inlet**2, just with a
-	different proportionality constant), rather than random per-design
-	error.
+	inlet-to-outlet loss.
+
+	PRESSURE CONVENTION (confirmed via debug_pressure_breakdown.py against
+	a real trained checkpoint, D=400mm/Q=3000cfm case): the vortex-finder
+	exit at z=0 carries a large axial exit velocity (~50 m/s measured,
+	vs. ~15 m/s smeared inlet axial velocity -- by continuity, the same
+	flow that entered spread over the full inlet ring must squeeze
+	through the much smaller exhaust bore). If that exit kinetic energy
+	is counted as still "retained" (i.e. total pressure at the outlet
+	too), the field pressure drop comes out far below the Shepherd-Lapple
+	baseline, because Shepherd-Lapple's Nh was empirically calibrated
+	from real pressure-tap measurements taken where the exit jet's
+	kinetic energy has already dissipated -- i.e. real installations
+	count that exit velocity head as a LOSS, not recovered pressure.
+	So: inlet uses TOTAL pressure (static + dynamic -- the full head
+	driving flow into the system), outlet uses STATIC pressure ONLY
+	(the exit dynamic head is treated as dissipated/lost, matching how
+	the baseline was actually measured), when rho_kgm3 is provided.
 
 	Returns:
 		{"inlet_pressure_pa": float | None,
@@ -257,8 +270,12 @@ def compute_pressure_drop(
 			return p
 		return p + 0.5 * rho_kgm3 * (vr * vr + vt * vt + vz * vz)
 
+	# Inlet: total pressure (full driving head). Outlet: static only --
+	# the exit velocity head is a dissipated loss, not retained pressure
+	# (see docstring above). rho_kgm3=None keeps both static-only, for
+	# backward compatibility with any caller not passing rho.
 	inlet_p = [_total_p(vr, vt, vz, p) for (r, vr, vt, vz, p) in pts if r >= r_exhaust_m]
-	outlet_p = [_total_p(vr, vt, vz, p) for (r, vr, vt, vz, p) in pts if r < r_exhaust_m]
+	outlet_p = [p for (r, vr, vt, vz, p) in pts if r < r_exhaust_m]
 
 	if not inlet_p or not outlet_p:
 		return {
@@ -274,7 +291,10 @@ def compute_pressure_drop(
 
 	inlet_avg = sum(inlet_p) / len(inlet_p)
 	outlet_avg = sum(outlet_p) / len(outlet_p)
-	kind = "total (static+dynamic)" if rho_kgm3 is not None else "static-only"
+	kind = (
+		"inlet=total(static+dynamic), outlet=static-only"
+		if rho_kgm3 is not None else "static-only (both sides)"
+	)
 	return {
 		"inlet_pressure_pa": inlet_avg,
 		"outlet_pressure_pa": outlet_avg,
