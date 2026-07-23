@@ -121,8 +121,8 @@ FIELD_JOB_SWEEP_INTERVAL_SECONDS = 300
 # side, so both inference paths pick the model the same way.
 # ─────────────────────────────────────────────────────────────────────────
 _DEFAULT_CHECKPOINT_PATHS_BY_TYPE = {
-    "LAPPLE": "cyclone_model.pth",
-    "STAIRMAND": "cyclone_model_stairmand.pth",
+"LAPPLE": "cyclone_model_lapple_parametric.pth",
+      "STAIRMAND": "cyclone_model_stairmand.pth",
     "STAIRMAND_GP": "cyclone_model_stairmand_gp.pth",
     "SWIFT_HE": "cyclone_model_swift_he.pth",
 }
