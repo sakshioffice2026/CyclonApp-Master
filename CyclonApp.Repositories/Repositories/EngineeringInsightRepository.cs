@@ -42,7 +42,7 @@ namespace CyclonApp.Repositories.Repositories
             public const double MassFlowSpreadCritical = 0.30;
         }
 
-        public CycloneHealthReportDto GenerateReport(FieldResultDto result, double? knownEfficiencyPercent = null)
+        public CycloneHealthReportDto GenerateReport(FieldResultDto result, double? knownEfficiencyPercent = null, double? knownPressureDropPa = null)
         {
             if (result == null) throw new ArgumentNullException(nameof(result));
 
@@ -52,7 +52,7 @@ namespace CyclonApp.Repositories.Repositories
             double avgTangential = Average(result.VThetaMs);
             double maxWallVelocity = ComputeMaxWallVelocity(result);
 
-            insights.Add(EvaluatePressureDrop(maxPressureDrop));
+            insights.Add(EvaluatePressureDrop(maxPressureDrop, knownPressureDropPa));
             insights.Add(EvaluateSwirlStrength(avgTangential));
             insights.Add(EvaluateWallVelocity(maxWallVelocity));
             insights.Add(EvaluateMassConservation(result));
@@ -241,8 +241,59 @@ namespace CyclonApp.Repositories.Repositories
 
         // ── Individual rule evaluators ──────────────────────────────────
 
-        private EngineeringInsightDto EvaluatePressureDrop(double pressureDropPa)
+        private EngineeringInsightDto EvaluatePressureDrop(double pressureDropPa, double? knownPressureDropPa = null)
         {
+            // When the caller has this design's own Shepherd-Lapple pressure
+            // drop (from the standard calculation for this revision), judge
+            // the field-solve's result relative to THAT baseline instead of
+            // one fixed absolute Pa threshold shared by every cyclone type --
+            // a GP cyclone's normal operating dP is supposed to be lower than
+            // an HE cyclone's, so a single absolute threshold either
+            // over-flags GP-appropriate performance or under-flags HE's.
+            // See IEngineeringInsight.GenerateReport's knownPressureDropPa
+            // doc comment.
+            if (knownPressureDropPa.HasValue && knownPressureDropPa.Value > 0)
+            {
+                double ratio = pressureDropPa / knownPressureDropPa.Value;
+
+                if (ratio >= 1.5)
+                {
+                    return new EngineeringInsightDto
+                    {
+                        Category = "Pressure Drop",
+                        Severity = InsightSeverity.Critical,
+                        WhatHappened = $"Field-solve pressure loss ({pressureDropPa:F0} Pa) is {ratio:F1}x this design's own Shepherd-Lapple baseline ({knownPressureDropPa.Value:F0} Pa) -- well above the expected range for this geometry.",
+                        Why = "Air is entering at a high velocity, increasing wall friction and turbulent losses.",
+                        Impact = new List<string> { "Significantly higher fan power consumption", "Higher operating cost", "Increased wall wear" },
+                        Recommendation = "Reduce inlet velocity or increase cyclone diameter; re-run the simulation to confirm improvement."
+                    };
+                }
+                if (ratio >= 1.15)
+                {
+                    return new EngineeringInsightDto
+                    {
+                        Category = "Pressure Drop",
+                        Severity = InsightSeverity.Warning,
+                        WhatHappened = $"Field-solve pressure drop ({pressureDropPa:F0} Pa) is {ratio:F1}x this design's own Shepherd-Lapple baseline ({knownPressureDropPa.Value:F0} Pa) -- somewhat higher than expected for this geometry.",
+                        Why = "Air enters the cyclone at a higher velocity, increasing wall friction.",
+                        Impact = new List<string> { "Increased fan power", "Higher operating cost", "Increased wall wear" },
+                        Recommendation = "Reduce inlet velocity by approximately 8-12% or optimize cyclone dimensions."
+                    };
+                }
+                return new EngineeringInsightDto
+                {
+                    Category = "Pressure Drop",
+                    Severity = InsightSeverity.Good,
+                    WhatHappened = $"Pressure drop ({pressureDropPa:F0} Pa) is within the expected range for this design's own Shepherd-Lapple baseline ({knownPressureDropPa.Value:F0} Pa).",
+                    Why = "Inlet velocity and geometry are well matched for this flow rate.",
+                    Impact = new List<string> { "Efficient fan operation", "Lower operating cost" },
+                    Recommendation = "No action needed."
+                };
+            }
+
+            // Fallback: no design-specific baseline available (e.g. the
+            // standard calculation for this revision hasn't been run yet)
+            // -- use the fixed absolute threshold as before.
             if (pressureDropPa >= Thresholds.PressureDropCriticalPa)
             {
                 return new EngineeringInsightDto
