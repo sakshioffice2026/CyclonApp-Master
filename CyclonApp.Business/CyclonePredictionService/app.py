@@ -456,7 +456,7 @@ def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
         # max(pressure_pa) - min(pressure_pa) over the whole grid -- is
         # the quantity comparable to CyclonCalculationRepository.cs's
         # Shepherd-Lapple dP_Pa.
-        pdrop = compute_pressure_drop(grid, r_exhaust_m=geometry.r_exhaust)
+        pdrop = compute_pressure_drop(grid, r_exhaust_m=geometry.r_exhaust, rho_kgm3=rho)
         if pdrop["pressure_drop_pa"] is None:
             print(
                 f"[predict_field] WARNING: could not compute inlet/outlet "

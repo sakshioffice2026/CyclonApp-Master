@@ -156,7 +156,7 @@ def field_solve_pa(
         diameter_m=diameter_mm * 1e-3,
         flow_rate_cfm=flow_rate_cfm,
     )
-    pdrop = compute_pressure_drop(grid, r_exhaust_m=geometry.r_exhaust)
+    pdrop = compute_pressure_drop(grid, r_exhaust_m=geometry.r_exhaust, rho_kgm3=rho)
     return {"rho": rho, "v_inlet_ms": v_inlet, **pdrop}
 
 

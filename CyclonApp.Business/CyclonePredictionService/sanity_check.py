@@ -209,7 +209,9 @@ def check_wall_and_axis(grid: dict, v_inlet: float) -> bool:
 	return ok
 
 
-def compute_pressure_drop(grid: dict, r_exhaust_m: float) -> dict:
+def compute_pressure_drop(
+	grid: dict, r_exhaust_m: float, rho_kgm3: float | None = None,
+) -> dict:
 	"""Pressure drop between the inlet ring and the vortex-finder gas
 	outlet -- both of which sit at the SAME z=0 plane in this axisymmetric
 	model (see CycloneAxisymGeometry.sample_inlet_ring /
@@ -250,8 +252,13 @@ def compute_pressure_drop(grid: dict, r_exhaust_m: float) -> dict:
 	z0 = min(groups.keys())  # top plane, z=0 (or nearest sampled value to it)
 	pts = groups[z0]  # list of (r, vr, vt, vz, p)
 
-	inlet_p = [p for (r, _vr, _vt, _vz, p) in pts if r >= r_exhaust_m]
-	outlet_p = [p for (r, _vr, _vt, _vz, p) in pts if r < r_exhaust_m]
+	def _total_p(vr: float, vt: float, vz: float, p: float) -> float:
+		if rho_kgm3 is None:
+			return p
+		return p + 0.5 * rho_kgm3 * (vr * vr + vt * vt + vz * vz)
+
+	inlet_p = [_total_p(vr, vt, vz, p) for (r, vr, vt, vz, p) in pts if r >= r_exhaust_m]
+	outlet_p = [_total_p(vr, vt, vz, p) for (r, vr, vt, vz, p) in pts if r < r_exhaust_m]
 
 	if not inlet_p or not outlet_p:
 		return {
@@ -267,11 +274,15 @@ def compute_pressure_drop(grid: dict, r_exhaust_m: float) -> dict:
 
 	inlet_avg = sum(inlet_p) / len(inlet_p)
 	outlet_avg = sum(outlet_p) / len(outlet_p)
+	kind = "total (static+dynamic)" if rho_kgm3 is not None else "static-only"
 	return {
 		"inlet_pressure_pa": inlet_avg,
 		"outlet_pressure_pa": outlet_avg,
 		"pressure_drop_pa": inlet_avg - outlet_avg,
-		"detail": f"{len(inlet_p)} inlet pts, {len(outlet_p)} outlet pts at z={z0}",
+		"detail": (
+			f"{len(inlet_p)} inlet pts, {len(outlet_p)} outlet pts at z={z0} "
+			f"({kind} pressure)"
+		),
 	}
 
 
