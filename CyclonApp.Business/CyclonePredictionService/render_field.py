@@ -98,16 +98,19 @@ def _draw_flow_arrows(ax, r_barrel: float, r_exhaust: float,
                          color="black", linewidth=1.4)
 
     # INLET — gas enters tangentially near the barrel top; drawn just
-    # outside the barrel wall pointing down into the body.
+    # outside the barrel wall pointing down into the body. Both the arrow
+    # and its label are kept at z >= 0 (never above the barrel top) so
+    # they can't stray into the title's strip above the axes, which is
+    # what caused the earlier "INLET (gas in)" / title overlap.
     inlet_x = r_barrel * 1.18
-    ax.annotate("", xy=(inlet_x, 0.18 * z_barrel_end), xytext=(inlet_x, 0.0),
+    ax.annotate("", xy=(inlet_x, 0.20 * z_barrel_end), xytext=(inlet_x, 0.02 * z_barrel_end),
                 arrowprops=arrow_kwargs)
-    ax.text(inlet_x, -0.06 * z_barrel_end, "INLET (gas in)", **label_kwargs)
+    ax.text(inlet_x, 0.30 * z_barrel_end, "INLET (gas in)", **label_kwargs)
 
     # OUTLET — clean gas exits upward through the vortex finder bore
-    # (centerline, z=0), so the arrow points from inside the exhaust
-    # duct out toward z=0.
-    ax.annotate("", xy=(0.0, -0.10 * z_barrel_end), xytext=(0.0, z_exhaust_end),
+    # (centerline, z=0). Drawn entirely within the exhaust duct (z >= 0)
+    # rather than poking above z=0, for the same reason as above.
+    ax.annotate("", xy=(0.0, 0.02 * z_barrel_end), xytext=(0.0, z_exhaust_end),
                 arrowprops=arrow_kwargs)
     ax.text(0.0, z_exhaust_end + 0.12 * z_barrel_end, "OUTLET (clean gas)",
             **label_kwargs)
@@ -238,7 +241,7 @@ def render_cyclone_field(
     _draw_flow_arrows(ax, r_barrel, r_exhaust, z_barrel_end, z_exhaust_end)
     ax.invert_yaxis()
     ax.set_aspect("equal")
-    ax.set_title("Geometry + Flow Visualization (Streamlines)", fontsize=10)
+    ax.set_title("Geometry + Flow Visualization (Streamlines)", fontsize=10, pad=10)
     ax.set_xlabel("r (m)")
     ax.set_ylabel("z (m, from barrel top)")
     fig.colorbar(strm.lines, ax=ax, label="Velocity magnitude (m/s)")
@@ -253,7 +256,7 @@ def render_cyclone_field(
     _draw_flow_arrows(ax2, r_barrel, r_exhaust, z_barrel_end, z_exhaust_end)
     ax2.invert_yaxis()
     ax2.set_aspect("equal")
-    ax2.set_title("Quantitative Pressure Slice (Side View)", fontsize=10)
+    ax2.set_title("Quantitative Pressure Slice (Side View)", fontsize=10, pad=10)
     ax2.set_xlabel("r (m)")
     fig.colorbar(cf2, ax=ax2, label="Static Pressure (Pa)")
 
