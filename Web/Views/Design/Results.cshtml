@@ -323,6 +323,64 @@
     </div>
 </div>
 
+<!-- ── CFD Visualization (rendered PNG, separate from the raw field-solve card) ── -->
+<div class="row g-4 mt-1">
+    <div class="col-12">
+        <div class="card" id="cfdImageCard">
+            <form id="cfdImageAntiForgeryForm" class="d-none">@Html.AntiForgeryToken()</form>
+            <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                <h5 class="card-title mb-0">
+                    <i class="bi bi-image me-2 text-primary"></i>CFD Visualization
+                </h5>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="badge d-none" id="cfdImageStatusBadge"></span>
+                    <button type="button" class="btn btn-primary btn-sm" id="btnGenerateCfdImage"
+                            data-revision-id="@Model.RevisionId">
+                        <i class="bi bi-image me-1"></i>Generate CFD Image
+                    </button>
+                </div>
+            </div>
+            <div class="card-body">
+                <p class="text-muted mb-3" style="font-size:12.5px;">
+                    Renders a CFD-style contour image of this design — velocity streamlines and
+                    static pressure, side by side — from the same physics field solve as above.
+                    This runs its own field-solve job, so it takes a few minutes and counts
+                    against the same concurrent-job limit as "Run Field Solve".
+                </p>
+
+                <div id="cfdImageIdle" style="font-size:12.5px;color:var(--text-muted);">
+                    Not generated for this revision yet.
+                </div>
+
+                <div id="cfdImageRunning" class="d-none">
+                    <div class="d-flex align-items-center gap-2 mb-2">
+                        <div class="spinner-border spinner-border-sm text-primary" role="status"></div>
+                        <span style="font-size:12.5px;">Solving and rendering — this updates automatically, no need to refresh.</span>
+                    </div>
+                </div>
+
+                <div id="cfdImageError" class="d-none p-2 mb-2"
+                     style="background:#fee2e2;border:1px solid #fca5a5;border-radius:6px;font-size:12.5px;color:#dc2626;"></div>
+
+                <div id="cfdImageResult" class="d-none">
+                    <div id="cfdImageUnavailable" class="d-none p-2 mb-2"
+                         style="background:#fef9c3;border:1px solid #fde68a;border-radius:6px;font-size:12.5px;color:#92400e;">
+                        The field solve completed, but the CFD image could not be rendered for this job.
+                    </div>
+                    <div class="text-center">
+                        <img id="cfdResultImg" src="" alt="CFD result: velocity streamlines and static pressure"
+                             style="max-width:100%;border:1px solid var(--border);border-radius:6px;" />
+                    </div>
+                    <p class="text-muted mt-2 mb-0" style="font-size:11px;">
+                        Left: geometry + velocity streamlines. Right: static pressure slice.
+                        Both panels share the design's own solved geometry and field values.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
 @section Styles {
     <style>
         /* .kpi-card { */
@@ -1088,6 +1146,172 @@
 
             fieldSelect.addEventListener('change', (e) => drawFieldChart(e.target.value));
             btn.addEventListener('click', startFieldSolve);
+        })();
+
+        // ── CFD Visualization card — separate job, separate state machine.
+        // Deliberately not sharing lastJobId with the "Physics Field Solve"
+        // card above: that card polls/renders raw grid data into a canvas
+        // scatter chart, this one polls/renders the matplotlib PNG
+        // (result.pngUrl) — same /Design/StartFieldPrediction +
+        // /Design/FieldPredictionStatus endpoints, since app.py now
+        // produces both the raw grid and the PNG from the same job.
+        (function () {
+            const btn      = document.getElementById('btnGenerateCfdImage');
+            if (!btn) return;
+
+            const revisionId = btn.dataset.revisionId;
+            const idleEl        = document.getElementById('cfdImageIdle');
+            const runningEl     = document.getElementById('cfdImageRunning');
+            const errorEl       = document.getElementById('cfdImageError');
+            const resultEl      = document.getElementById('cfdImageResult');
+            const unavailableEl = document.getElementById('cfdImageUnavailable');
+            const badgeEl       = document.getElementById('cfdImageStatusBadge');
+            const imgEl         = document.getElementById('cfdResultImg');
+
+            const POLL_INTERVAL_MS = 4000;
+            const MAX_POLL_MS      = 15 * 60 * 1000;
+            let pollTimer     = null;
+            let pollStartedAt = null;
+
+            function getAntiForgeryToken() {
+                const input = document.querySelector(
+                    '#cfdImageAntiForgeryForm input[name="__RequestVerificationToken"]');
+                return input ? input.value : null;
+            }
+
+            function showState(state) {
+                idleEl.classList.toggle('d-none', state !== 'idle');
+                runningEl.classList.toggle('d-none', state !== 'running');
+                errorEl.classList.toggle('d-none', state !== 'error');
+                resultEl.classList.toggle('d-none', state !== 'completed');
+            }
+
+            function setBadge(text, bg, fg) {
+                if (!text) { badgeEl.classList.add('d-none'); return; }
+                badgeEl.textContent = text;
+                badgeEl.style.background = bg;
+                badgeEl.style.color = fg;
+                badgeEl.style.border = '1px solid ' + fg;
+                badgeEl.classList.remove('d-none');
+            }
+
+            function stopPolling() {
+                if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+            }
+
+            function showError(message) {
+                errorEl.textContent = message;
+                showState('error');
+                setBadge('Failed', '#fee2e2', '#dc2626');
+                btn.disabled = false;
+            }
+
+            async function parseErrorBody(resp) {
+                try { return await resp.json(); } catch { return {}; }
+            }
+
+            async function startCfdImage() {
+                stopPolling();
+                errorEl.classList.add('d-none');
+                btn.disabled = true;
+                setBadge('Starting…', '#e0e7ff', '#4338ca');
+
+                const token = getAntiForgeryToken();
+                const form = new FormData();
+                if (token) form.append('__RequestVerificationToken', token);
+
+                try {
+                    const resp = await fetch(`/Design/StartFieldPrediction/${revisionId}`, {
+                        method: 'POST',
+                        body: form,
+                    });
+
+                    if (resp.status === 429) {
+                        const body = await parseErrorBody(resp);
+                        showError(body.error || 'Too many field-prediction jobs running. Try again shortly.');
+                        setBadge(null);
+                        return;
+                    }
+                    if (!resp.ok) {
+                        const body = await parseErrorBody(resp);
+                        showError(body.error || 'Could not start the CFD render.');
+                        setBadge(null);
+                        return;
+                    }
+
+                    const data = await resp.json();
+                    showState('running');
+                    setBadge('Running', '#dbeafe', '#1d4ed8');
+                    pollStartedAt = Date.now();
+                    pollStatus(data.jobId);
+                } catch (e) {
+                    showError('Could not reach the field prediction service.');
+                    setBadge(null);
+                }
+            }
+
+            async function pollStatus(jobId) {
+                stopPolling();
+
+                if (Date.now() - pollStartedAt > MAX_POLL_MS) {
+                    showError('This is taking longer than expected. Check back later or try again.');
+                    return;
+                }
+
+                try {
+                    const resp = await fetch(`/Design/FieldPredictionStatus?jobId=${encodeURIComponent(jobId)}`);
+
+                    if (resp.status === 404) {
+                        showError('Job expired before it finished. Please try again.');
+                        return;
+                    }
+                    if (!resp.ok) {
+                        const body = await parseErrorBody(resp);
+                        showError(body.error || 'Lost contact with the field prediction service.');
+                        return;
+                    }
+
+                    const status = await resp.json();
+
+                    if (status.status === 'running') {
+                        pollTimer = setTimeout(() => pollStatus(jobId), POLL_INTERVAL_MS);
+                        return;
+                    }
+
+                    if (status.status === 'failed') {
+                        showError(status.errorMessage || 'The field solve failed.');
+                        return;
+                    }
+
+                    // completed
+                    renderCfdImage(status.result);
+                    btn.disabled = false;
+                    setBadge('Completed', '#dcfce7', '#16a34a');
+                } catch (e) {
+                    // Transient network hiccup — keep polling rather than giving up.
+                    pollTimer = setTimeout(() => pollStatus(jobId), POLL_INTERVAL_MS);
+                }
+            }
+
+            function renderCfdImage(result) {
+                if (!result) { showError('Completed with no result data.'); return; }
+
+                if (result.pngUrl) {
+                    unavailableEl.classList.add('d-none');
+                    imgEl.classList.remove('d-none');
+                    // Cache-bust: a retried job can reuse a job_id-scoped path
+                    // in principle, so force a fresh fetch rather than trust
+                    // the browser's cache for what looks like the same URL.
+                    imgEl.src = result.pngUrl + '?t=' + Date.now();
+                } else {
+                    unavailableEl.classList.remove('d-none');
+                    imgEl.classList.add('d-none');
+                }
+
+                showState('completed');
+            }
+
+            btn.addEventListener('click', startCfdImage);
         })();
     </script>
 }

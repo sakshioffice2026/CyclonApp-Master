@@ -215,7 +215,14 @@ namespace CyclonApp.Repositories.Repositories
                     VInletMs = wire.Result.VInletMs,
                     MassConservationStatus = wire.Result.MassConservationStatus,
                     MassFlowSpread = wire.Result.MassFlowSpread,
-                    FinalLoss = wire.Result.FinalLoss
+                    FinalLoss = wire.Result.FinalLoss,
+                    // wire.Result.PngUrl is relative ("/renders/<jobId>/cfd_result.png")
+                    // — resolve it against the same _baseUrl this repository
+                    // already uses to reach the Python service, so the
+                    // browser can load it directly as an <img src>.
+                    PngUrl = string.IsNullOrEmpty(wire.Result.PngUrl)
+                        ? null
+                        : new Uri(new Uri(_baseUrl), wire.Result.PngUrl).ToString()
                 },
                 // Unix seconds (float, matches Python's time.time()) -> UTC DateTime.
                 CreatedAtUtc = wire.CreatedAtUnix.HasValue
@@ -295,6 +302,13 @@ namespace CyclonApp.Repositories.Repositories
             public string? MassConservationStatus { get; set; }
             public double? MassFlowSpread { get; set; }
             public double? FinalLoss { get; set; }
+
+            // Relative path on the Python service, e.g.
+            // "/renders/<jobId>/cfd_result.png". Resolved to an absolute
+            // URL (against _baseUrl) before being handed to FieldResultDto
+            // below — the browser loading this <img src> has no reason to
+            // know the Python service's base address otherwise.
+            public string? PngUrl { get; set; }
         }
     }
 }

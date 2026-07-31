@@ -66,6 +66,7 @@ import json
 import math
 import threading
 import time
+import traceback
 import uuid
 from typing import Optional
 
@@ -87,8 +88,18 @@ from field_physics import (
 )
 from field_turbulence import hydraulic_diameter_rect_m, inlet_turbulence_quantities
 from sanity_check import mass_conservation_metrics, compute_pressure_drop
+from render_field import render_cyclone_field
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="Cyclone Prediction Service (Physics-Informed)")
+
+# Where per-job CFD PNGs land, and the URL prefix they're served under.
+# One subfolder per job_id so concurrent jobs (MAX_CONCURRENT_FIELD_JOBS)
+# never clobber each other's cfd_result.png, and so a stale/expired job's
+# image is easy to identify and sweep alongside its job-store entry.
+RENDERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "renders")
+os.makedirs(RENDERS_DIR, exist_ok=True)
+app.mount("/renders", StaticFiles(directory=RENDERS_DIR), name="renders")
 
 
 # Job lifecycle / resource-limit config — see module docstring above.
@@ -329,6 +340,14 @@ class FieldResultDto(BaseModel):
     mass_flow_spread: Optional[float] = Field(alias="MassFlowSpread", default=None)
     final_loss: Optional[float] = Field(alias="FinalLoss", default=None)
 
+    # Relative URL (e.g. "/renders/<job_id>/cfd_result.png") for the
+    # matplotlib CFD-style contour PNG produced by render_field.py's
+    # render_cyclone_field, mounted via the /renders StaticFiles app
+    # above. None means rendering hasn't run yet or failed — see
+    # _run_field_job's render step, which never lets a rendering failure
+    # fail the underlying field-solve job itself.
+    png_url: Optional[str] = Field(alias="PngUrl", default=None)
+
 
 class PredictFieldStatusResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -463,6 +482,37 @@ def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
                 f"pressure drop for job {job_id}: {pdrop['detail']}"
             )
 
+        # CFD-style contour PNG (render_field.py) — same in-process,
+        # no-IPC-needed rationale documented in that module's docstring.
+        # A rendering failure must never fail the underlying field-solve
+        # job the client is waiting on, so it's caught and logged, and
+        # png_url is simply left None (client-side UI treats that as
+        # "image unavailable", not an error state for the whole job).
+        png_url = None
+        try:
+            job_output_dir = os.path.join(RENDERS_DIR, job_id)
+            geometry_mm = dict(
+                barrel_diameter_mm=req.barrel_diameter_mm,
+                barrel_height_mm=req.barrel_height_mm,
+                cone_height_mm=req.cone_height_mm,
+                exhaust_dia_mm=req.exhaust_dia_mm,
+                exhaust_length_mm=req.exhaust_length_mm,
+                bottom_outlet_mm=req.bottom_outlet_mm,
+            )
+            render_cyclone_field(
+                grid=grid,
+                geometry_mm=geometry_mm,
+                output_dir=job_output_dir,
+                known_efficiency_percent=None,  # not available service-side; .NET has its own value
+                known_pressure_drop_pa=pdrop["pressure_drop_pa"],
+            )
+            png_url = f"/renders/{job_id}/cfd_result.png"
+        except Exception:
+            print(
+                f"[predict_field] WARNING: CFD PNG render failed for job "
+                f"{job_id}:\n{traceback.format_exc()}"
+            )
+
         field_result = FieldResultDto(
             r_m=grid["r_m"], z_m=grid["z_m"],
             v_r_ms=grid["v_r_ms"], v_theta_ms=grid["v_theta_ms"],
@@ -476,6 +526,7 @@ def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
             mass_conservation_status=grid.get("mass_conservation_status"),
             mass_flow_spread=grid.get("mass_flow_spread"),
             final_loss=None,  # no training occurred for this request
+            png_url=png_url,
         )
 
         with _field_jobs_lock:
@@ -516,6 +567,18 @@ def _sweep_expired_field_jobs() -> None:
         ]
         for jid in expired:
             del _field_jobs[jid]
+
+    # Outside the lock: filesystem I/O shouldn't hold up job-store access,
+    # and these directories are keyed by job_id (UUID) so there's no
+    # cross-job collision risk in deleting them after the fact.
+    for jid in expired:
+        job_render_dir = os.path.join(RENDERS_DIR, jid)
+        if os.path.isdir(job_render_dir):
+            try:
+                import shutil
+                shutil.rmtree(job_render_dir, ignore_errors=True)
+            except OSError:
+                pass
 
 
 def _field_job_sweeper_loop() -> None:

@@ -121,6 +121,18 @@ namespace CyclonApp.Model.DTOs
         /// <summary>Final training/solver loss value at convergence.</summary>
         [JsonPropertyName("finalLoss")]
         public double? FinalLoss { get; set; }
+
+        /// <summary>Relative URL on the Python service (e.g.
+        /// "/renders/&lt;jobId&gt;/cfd_result.png") for the matplotlib
+        /// CFD-style contour PNG produced by render_field.py. Null means
+        /// rendering hasn't completed yet, or failed — the failure is
+        /// logged service-side but never fails the underlying field-solve
+        /// job, so absence here should read as "image unavailable", not
+        /// as an error for the whole result. CyclonePredictionRepository
+        /// resolves this into an absolute URL (PngUrl is relative to the
+        /// Python service's own base address, not this app's).</summary>
+        [JsonPropertyName("pngUrl")]
+        public string? PngUrl { get; set; }
     }
 
 
