@@ -7,6 +7,7 @@ using CyclonApp.Model.ViewModel;
 using CyclonApp.Repositories.Contracts;
 using CyclonApp.Business.CyclonePrediction;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc;
 
 
@@ -23,6 +24,8 @@ public class DesignController : Controller
     private readonly ILogger<DesignController> _logger;
     private readonly IEngineeringInsight _engineeringInsight;
     private readonly CycloneFieldOnnxPredictorProvider _onnxPredictorProvider;
+    private readonly IWebHostEnvironment _webHostEnvironment;
+    private readonly IHttpClientFactory _httpClientFactory;
     public readonly IUnitOfWork _uow;
 
 
@@ -38,6 +41,8 @@ public class DesignController : Controller
     IEngineeringInsight engineeringInsight,
     CycloneFieldOnnxPredictorProvider onnxPredictorProvider,
     ILogger<DesignController> logger,
+    IWebHostEnvironment webHostEnvironment,
+    IHttpClientFactory httpClientFactory,
     IUnitOfWork uow)
     {
         _designRepository = designRepository;
@@ -48,6 +53,8 @@ public class DesignController : Controller
         _engineeringInsight = engineeringInsight;
         _onnxPredictorProvider = onnxPredictorProvider;
         _logger = logger;
+        _webHostEnvironment = webHostEnvironment;
+        _httpClientFactory = httpClientFactory;
         _uow = uow;
     }
 
@@ -640,7 +647,7 @@ public class DesignController : Controller
     }
 
     [HttpGet]
-    public async Task<IActionResult> FieldPredictionStatus(string jobId)
+    public async Task<IActionResult> FieldPredictionStatus(string jobId, int? revisionId = null)
     {
         try
         {
@@ -648,6 +655,47 @@ public class DesignController : Controller
             if (status == null)
             {
                 return NotFound(new { error = "Job not found — it may have expired. Start a new field prediction." });
+            }
+
+            // Persist the rendered CFD image against the revision so the
+            // Results page can show it again on a later visit (including a
+            // fresh login), instead of only ever existing for the lifetime
+            // of this one poll/job. revisionId is only sent by the CFD
+            // Visualization card (see Results.cshtml) — the Physics Field
+            // Solve card polls this same endpoint without it, so this is a
+            // no-op for that caller.
+            //
+            // The Python service's own pngUrl is swept ~1hr after the job
+            // completes (FIELD_JOB_TTL_SECONDS in app.py), so we don't just
+            // store that URL — we download the bytes now, while they're
+            // still available, and write them into this app's own wwwroot
+            // (served by the app.UseStaticFiles() already configured in
+            // Program.cs). That local copy is what actually survives long
+            // term / across logins.
+            if (revisionId.HasValue && status.Status == "completed" && !string.IsNullOrEmpty(status.Result?.PngUrl))
+            {
+                try
+                {
+                    var revision = await _designRepository.GetRevisionByIdAsync(revisionId.Value);
+                    if (revision != null)
+                    {
+                        var savedUrl = await DownloadAndSaveCfdImageAsync(revisionId.Value, status.Result.PngUrl);
+                        if (savedUrl != null)
+                        {
+                            await _designRepository.SaveCfdImageAsync(revision, savedUrl);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Saving the local copy must never break the status poll
+                    // the client is waiting on — same swallow-and-log
+                    // approach as the Insights generation just below.
+                    _uow.exceptionHandlerRepository.SaveException(
+                        "DesignController",
+                        "FieldPredictionStatus.SaveCfdImage",
+                        ex.ToString());
+                }
             }
 
             // ROOT-CAUSE FIX: _engineeringInsight was injected into this
@@ -818,6 +866,28 @@ public class DesignController : Controller
         }
     }
 
+    // Downloads the rendered CFD PNG from the Python prediction service and
+    // writes it into this app's own wwwroot, so it's served locally by the
+    // existing app.UseStaticFiles() middleware and isn't subject to that
+    // service's ~1hr render TTL. One file per revision (overwritten on each
+    // regenerate) rather than one per job — keeps disk usage bounded and
+    // means "the saved image for this revision" always has one obvious path.
+    private async Task<string?> DownloadAndSaveCfdImageAsync(int revisionId, string pngUrl)
+    {
+        var client = _httpClientFactory.CreateClient();
+        var bytes = await client.GetByteArrayAsync(pngUrl);
+
+        var folder = Path.Combine(_webHostEnvironment.WebRootPath, "cfd-renders", revisionId.ToString());
+        Directory.CreateDirectory(folder);
+
+        var filePath = Path.Combine(folder, "cfd_result.png");
+        await System.IO.File.WriteAllBytesAsync(filePath, bytes);
+
+        // Relative URL — resolved against this app's own host, not the
+        // Python service's, since it's now a local static file.
+        return $"/cfd-renders/{revisionId}/cfd_result.png";
+    }
+
     private DesignResultsViewModel BuildResultsVm(DesignRevision revision)
     {
         var output = string.IsNullOrEmpty(revision.EfficiencyJson)
@@ -890,6 +960,8 @@ public class DesignController : Controller
             PredictionIsWithinTrustedRange = prediction?.IsWithinTrustedRange ?? false,
             PredictionNotes = prediction?.Notes,
             PredictedAt = revision.PredictedAt,
+            CfdImageUrl = revision.CfdImageUrl,
+            CfdImageGeneratedAt = revision.CfdImageGeneratedAt,
         };
     }
 }

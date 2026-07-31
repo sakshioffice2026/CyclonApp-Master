@@ -196,6 +196,11 @@ public class DesignResultsViewModel
     public bool PredictionIsWithinTrustedRange { get; set; }
     public string? PredictionNotes { get; set; }
     public DateTime? PredictedAt { get; set; }
+
+    // CFD Visualization (rendered PNG) — persisted per-revision so a saved
+    // image is shown again on later visits. See DesignRevision.CfdImageUrl.
+    public string? CfdImageUrl { get; set; }
+    public DateTime? CfdImageGeneratedAt { get; set; }
 }
 
 // ── REVISION LIST ─────────────────────────────────────────────────────────────

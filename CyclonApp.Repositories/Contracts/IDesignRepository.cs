@@ -15,5 +15,6 @@ namespace CyclonApp.Repositories.Contracts
         Task<DesignRevision?> GetRevisionByIdAsync(int id);
         Task<DesignRevision?> GetRevisionWithDetailsAsync(int id);
         Task SavePredictionAsync(DesignRevision revision, string predictionJson);
+        Task SaveCfdImageAsync(DesignRevision revision, string pngUrl);
     }
 }

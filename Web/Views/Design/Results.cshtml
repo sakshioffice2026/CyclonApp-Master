@@ -335,8 +335,13 @@
                 <div class="d-flex align-items-center gap-2">
                     <span class="badge d-none" id="cfdImageStatusBadge"></span>
                     <button type="button" class="btn btn-primary btn-sm" id="btnGenerateCfdImage"
-                            data-revision-id="@Model.RevisionId">
+                            data-revision-id="@Model.RevisionId"
+                            data-saved-png-url="@Model.CfdImageUrl"
+                            data-saved-generated-at="@(Model.CfdImageGeneratedAt?.ToString("o"))">
                         <i class="bi bi-image me-1"></i>Generate CFD Image
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm d-none" id="btnDownloadCfdImage">
+                        <i class="bi bi-download me-1"></i>Download
                     </button>
                 </div>
             </div>
@@ -1167,6 +1172,7 @@
             const unavailableEl = document.getElementById('cfdImageUnavailable');
             const badgeEl       = document.getElementById('cfdImageStatusBadge');
             const imgEl         = document.getElementById('cfdResultImg');
+            const downloadBtn   = document.getElementById('btnDownloadCfdImage');
 
             const POLL_INTERVAL_MS = 4000;
             const MAX_POLL_MS      = 15 * 60 * 1000;
@@ -1184,6 +1190,18 @@
                 runningEl.classList.toggle('d-none', state !== 'running');
                 errorEl.classList.toggle('d-none', state !== 'error');
                 resultEl.classList.toggle('d-none', state !== 'completed');
+                // Download only makes sense once an image is actually on screen.
+                downloadBtn.classList.toggle('d-none', !(state === 'completed' && imgEl.src && !imgEl.classList.contains('d-none')));
+            }
+
+            function downloadImage() {
+                if (!imgEl.src) return;
+                const a = document.createElement('a');
+                a.href = imgEl.src;
+                a.download = `cfd-visualization-revision-${revisionId}.png`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
             }
 
             function setBadge(text, bg, fg) {
@@ -1259,7 +1277,7 @@
                 }
 
                 try {
-                    const resp = await fetch(`/Design/FieldPredictionStatus?jobId=${encodeURIComponent(jobId)}`);
+                    const resp = await fetch(`/Design/FieldPredictionStatus?jobId=${encodeURIComponent(jobId)}&revisionId=${encodeURIComponent(revisionId)}`);
 
                     if (resp.status === 404) {
                         showError('Job expired before it finished. Please try again.');
@@ -1314,7 +1332,40 @@
                 showState('completed');
             }
 
+            // ── Restore a previously-saved image on page load ────────────────
+            // DesignController.FieldPredictionStatus downloads the PNG at
+            // completion time and writes it into this app's own
+            // wwwroot/cfd-renders/<revisionId>/, saving that durable local
+            // path on the revision (CfdImageUrl/CfdImageGeneratedAt) — see
+            // Results.cshtml's data-saved-png-url/data-saved-generated-at
+            // attributes above. That local copy isn't subject to the Python
+            // service's ~1hr render TTL, so this is a real "view whenever I
+            // come back" restore. imgEl.onerror below is just a safety net
+            // (e.g. the file was manually removed from disk) rather than the
+            // expected case.
+            function restoreSavedImage() {
+                const savedUrl = btn.dataset.savedPngUrl;
+                const savedAt  = btn.dataset.savedGeneratedAt;
+                if (!savedUrl) return;
+
+                unavailableEl.classList.add('d-none');
+                imgEl.classList.remove('d-none');
+                imgEl.onerror = () => {
+                    imgEl.classList.add('d-none');
+                    unavailableEl.textContent = 'The saved CFD image could not be loaded. Click "Generate CFD Image" to render a new one.';
+                    unavailableEl.classList.remove('d-none');
+                };
+                imgEl.src = savedUrl + '?t=' + (savedAt ? new Date(savedAt).getTime() : Date.now());
+                showState('completed');
+
+                if (savedAt) {
+                    setBadge('Saved ' + new Date(savedAt).toLocaleString(), '#f1f5f9', '#475569');
+                }
+            }
+
             btn.addEventListener('click', startCfdImage);
+            downloadBtn.addEventListener('click', downloadImage);
+            restoreSavedImage();
         })();
     </script>
 }

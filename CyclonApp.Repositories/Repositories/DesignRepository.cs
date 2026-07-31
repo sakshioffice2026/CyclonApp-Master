@@ -86,5 +86,12 @@ namespace CyclonApp.Repositories.Repositories
             revision.PredictedAt = DateTime.UtcNow;
             await _db.SaveChangesAsync();
         }
+
+        public async Task SaveCfdImageAsync(DesignRevision revision, string pngUrl)
+        {
+            revision.CfdImageUrl = pngUrl;
+            revision.CfdImageGeneratedAt = DateTime.UtcNow;
+            await _db.SaveChangesAsync();
+        }
     }
 }

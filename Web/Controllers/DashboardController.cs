@@ -1,8 +1,9 @@
-﻿using System.Security.Claims;
+﻿using CyclonApp.Model.DTOs;
 using CyclonApp.Repositories.Contracts;
 using CyclonApp.Repositories.Repositories;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using System.Security.Claims;
 
 namespace Web.Controllers
 {
@@ -54,7 +55,7 @@ namespace Web.Controllers
                     ex.ToString());
 
                 TempData["Error"] = "An error occurred while loading the dashboard.";
-                return View();
+                return View(new DashboardDto());   // was: return View();
             }
         }
     }

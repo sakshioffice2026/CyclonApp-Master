@@ -98,12 +98,23 @@ public class DesignRevision
 
     // ── CALCULATED OUTPUTS (stored as JSON) ────────────────────────────────────
 
-  
+
 
     public string? PredictionJson { get; set; }    // CyclonePredictionDto object — physics-guided
                                                    // prediction, nullable until run
 
     public DateTime? PredictedAt { get; set; }      // when the prediction was last generated
+
+    // ── CFD VISUALIZATION (rendered PNG) ────────────────────────────────────
+    // Mirrors the PredictionJson/PredictedAt pair above. Unlike that pair,
+    // this doesn't store the Python field-solve service's own URL (that
+    // service sweeps its /renders/<jobId>/ files ~1hr after job completion)
+    // — DesignController downloads the PNG bytes at completion time and
+    // writes them into this app's own wwwroot/cfd-renders/<revisionId>/, so
+    // CfdImageUrl below is a durable local path that keeps working across
+    // logins/sessions, not just for the lifetime of the originating job.
+    public string? CfdImageUrl { get; set; }
+    public DateTime? CfdImageGeneratedAt { get; set; }
 
 
     // Navigation

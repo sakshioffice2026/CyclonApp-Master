@@ -15,18 +15,18 @@
     var isViewer = role == "Viewer";
 
     var jsonOptions = new JsonSerializerOptions
-            {
-                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-            };
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
 
     string Json(object o) => JsonSerializer.Serialize(o, jsonOptions);
 }
 <div class="alert alert-info mb-3">
     Status Count: @Model.ProjectsByStatus.Count |
     Primary Count:
-    @(isSuperAdmin ? Model.ProjectsPerTenant.Count : Model.DesignsByCycloneType.Count) |
+    @(isSuperAdmin? Model.ProjectsPerTenant.Count : Model.DesignsByCycloneType.Count) |
     Activity Count:
-    @(isEngineer ? Model.MyRevisionsPerMonth.Count : Model.RevisionsPerMonth.Count)
+    @(isEngineer? Model.MyRevisionsPerMonth.Count : Model.RevisionsPerMonth.Count)
 </div>
 @* ── KPI CARDS ──────────────────────────────────────────────────────────── *@
 <div class="page-header">
@@ -196,7 +196,7 @@
             <div class="card">
                 <div class="card-header">
                     <h6 class="card-title mb-0"><i class="bi bi-folder2-open me-2 text-primary"></i>Recent Projects</h6>
-                    <a href="@Url.Action("Index","Project")" class="btn btn-sm btn-outline-secondary">View All</a>
+                    <a href="@Url.Action("Index", "Project")" class="btn btn-sm btn-outline-secondary">View All</a>
                 </div>
                 <div class="list-group list-group-flush">
                     @foreach (var item in Model.RecentProjects)
@@ -259,7 +259,7 @@
             <div class="card">
                 <div class="card-header">
                     <h6 class="card-title mb-0"><i class="bi bi-download me-2 text-primary"></i>Recent Exports</h6>
-                    <a href="@Url.Action("Index","Export")" class="btn btn-sm btn-outline-secondary">View All</a>
+                    <a href="@Url.Action("Index", "Export")" class="btn btn-sm btn-outline-secondary">View All</a>
                 </div>
                 <div class="list-group list-group-flush">
                     @foreach (var item in Model.RecentExports)
@@ -507,16 +507,4 @@
             background: var(--surface-2, #F8FAFC);
         }
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-	<script>
-			// Chart.js global config can go here if needed
-                console.log("Chart:", Chart);
-
-    console.log("statusData", statusData);
-    console.log("primaryData", primaryData);
-    console.log("activityData", activityData);
-    console.log("effData", effData);
-    console.log("exportsData", exportsData);
-    console.log("usersData", usersData);
-	</script>
 }
