@@ -133,6 +133,14 @@ namespace CyclonApp.Model.DTOs
         /// Python service's own base address, not this app's).</summary>
         [JsonPropertyName("pngUrl")]
         public string? PngUrl { get; set; }
+
+        /// <summary>Short exception message when PngUrl is null because
+        /// rendering failed (e.g. "ValueError: ..."). The full traceback
+        /// is persisted service-side at /renders/&lt;jobId&gt;/render_error.log
+        /// for deeper debugging; this is just enough for the UI to show a
+        /// concrete reason instead of a generic failure message.</summary>
+        [JsonPropertyName("renderError")]
+        public string? RenderError { get; set; }
     }
 
 

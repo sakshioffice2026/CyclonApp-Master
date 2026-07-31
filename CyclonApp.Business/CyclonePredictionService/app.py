@@ -348,6 +348,14 @@ class FieldResultDto(BaseModel):
     # fail the underlying field-solve job itself.
     png_url: Optional[str] = Field(alias="PngUrl", default=None)
 
+    # Short exception message (e.g. "ValueError: ...") when png_url is
+    # None because rendering failed -- the full traceback is written to
+    # render_error.log next to where the PNG would have landed (see
+    # RENDERS_DIR/<job_id>/), reachable at /renders/<job_id>/render_error.log.
+    # This field is just enough for the client UI to show *something*
+    # concrete instead of a generic "could not be rendered" message.
+    render_error: Optional[str] = Field(alias="RenderError", default=None)
+
 
 class PredictFieldStatusResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -489,6 +497,7 @@ def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
         # png_url is simply left None (client-side UI treats that as
         # "image unavailable", not an error state for the whole job).
         png_url = None
+        render_error = None
         try:
             job_output_dir = os.path.join(RENDERS_DIR, job_id)
             geometry_mm = dict(
@@ -507,11 +516,24 @@ def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
                 known_pressure_drop_pa=pdrop["pressure_drop_pa"],
             )
             png_url = f"/renders/{job_id}/cfd_result.png"
-        except Exception:
+        except Exception as render_exc:
+            tb_text = traceback.format_exc()
+            render_error = f"{type(render_exc).__name__}: {render_exc}"
             print(
                 f"[predict_field] WARNING: CFD PNG render failed for job "
-                f"{job_id}:\n{traceback.format_exc()}"
+                f"{job_id}:\n{tb_text}"
             )
+            # Persisted alongside wherever the PNG would have landed, so
+            # the actual traceback is inspectable via the same /renders
+            # static mount -- previously this only went to the server
+            # console, which is unreachable to anyone not SSH'd into the
+            # box at the moment it happened.
+            try:
+                os.makedirs(job_output_dir, exist_ok=True)
+                with open(os.path.join(job_output_dir, "render_error.log"), "w", encoding="utf-8") as f:
+                    f.write(tb_text)
+            except OSError:
+                pass
 
         field_result = FieldResultDto(
             r_m=grid["r_m"], z_m=grid["z_m"],
@@ -527,6 +549,7 @@ def _run_field_job(job_id: str, req: PredictFieldStartRequest) -> None:
             mass_flow_spread=grid.get("mass_flow_spread"),
             final_loss=None,  # no training occurred for this request
             png_url=png_url,
+            render_error=render_error,
         )
 
         with _field_jobs_lock:

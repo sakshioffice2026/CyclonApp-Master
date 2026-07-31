@@ -198,12 +198,22 @@ def render_cyclone_field(
     # into one flat shade.
     v_valid = V.compressed()
     p_valid = P.compressed()
-    v_lo, v_hi = np.percentile(v_valid, [2, 98]) if v_valid.size else (0, 1)
-    p_lo, p_hi = np.percentile(p_valid, [2, 98]) if p_valid.size else (0, 1)
-    if v_hi <= v_lo:
-        v_lo, v_hi = float(v_valid.min()), float(v_valid.max())
-    if p_hi <= p_lo:
-        p_lo, p_hi = float(p_valid.min()), float(p_valid.max())
+    # NOTE: griddata(method="cubic") can legitimately leave NaN at query
+    # points *inside* the true wall boundary (near concave regions like the
+    # cone apex) where the input points' convex hull doesn't fully cover
+    # the query grid -- this is routine, not a data error. Plain
+    # np.percentile propagates any NaN straight through to NaN, silently
+    # producing a NaN vmin/vmax that (depending on matplotlib version) can
+    # either render a blank/degenerate plot or raise downstream. nan*
+    # variants ignore those NaNs instead of being poisoned by them.
+    v_lo, v_hi = np.nanpercentile(v_valid, [2, 98]) if v_valid.size else (0, 1)
+    p_lo, p_hi = np.nanpercentile(p_valid, [2, 98]) if p_valid.size else (0, 1)
+    if not np.isfinite(v_hi) or not np.isfinite(v_lo) or v_hi <= v_lo:
+        v_finite = v_valid[np.isfinite(v_valid)]
+        v_lo, v_hi = (float(v_finite.min()), float(v_finite.max())) if v_finite.size else (0.0, 1.0)
+    if not np.isfinite(p_hi) or not np.isfinite(p_lo) or p_hi <= p_lo:
+        p_finite = p_valid[np.isfinite(p_valid)]
+        p_lo, p_hi = (float(p_finite.min()), float(p_finite.max())) if p_finite.size else (0.0, 1.0)
 
     outline_xy, exhaust_xy = _cyclone_outline_xy(
         r_barrel, r_bottom_outlet, z_barrel_end, z_cone_end, r_exhaust, z_exhaust_end

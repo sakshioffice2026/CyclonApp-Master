@@ -222,7 +222,8 @@ namespace CyclonApp.Repositories.Repositories
                     // browser can load it directly as an <img src>.
                     PngUrl = string.IsNullOrEmpty(wire.Result.PngUrl)
                         ? null
-                        : new Uri(new Uri(_baseUrl), wire.Result.PngUrl).ToString()
+                        : new Uri(new Uri(_baseUrl), wire.Result.PngUrl).ToString(),
+                    RenderError = wire.Result.RenderError
                 },
                 // Unix seconds (float, matches Python's time.time()) -> UTC DateTime.
                 CreatedAtUtc = wire.CreatedAtUnix.HasValue
@@ -309,6 +310,7 @@ namespace CyclonApp.Repositories.Repositories
             // below — the browser loading this <img src> has no reason to
             // know the Python service's base address otherwise.
             public string? PngUrl { get; set; }
+            public string? RenderError { get; set; }
         }
     }
 }

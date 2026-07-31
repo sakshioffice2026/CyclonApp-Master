@@ -1304,6 +1304,9 @@
                     // the browser's cache for what looks like the same URL.
                     imgEl.src = result.pngUrl + '?t=' + Date.now();
                 } else {
+                    unavailableEl.textContent = result.renderError
+                        ? 'The field solve completed, but the CFD image could not be rendered: ' + result.renderError
+                        : 'The field solve completed, but the CFD image could not be rendered for this job.';
                     unavailableEl.classList.remove('d-none');
                     imgEl.classList.add('d-none');
                 }
