@@ -717,23 +717,21 @@ class GenerateCadResponse(BaseModel):
 
 @app.post("/generate_cad", response_model=GenerateCadResponse)
 def generate_cad(request: GenerateCadRequest):
-    try:
-        print("DEBUG: /generate_cad called")
-        print(f"DEBUG: request data = {request.dict()}")
-        from cad_generator import generate_cyclone_cad
-        print("DEBUG: cad_generator imported")
-def generate_cad(request: GenerateCadRequest):
     """
     Synchronous CAD generation — builds cyclone geometry from dimensions
     and exports STEP/DXF/PDF. Unlike /predict_field/start, no job store or
     polling: FreeCAD geometry+export takes seconds, so the HTTP request
     just waits for the result directly.
     """
+    print("DEBUG: /generate_cad called")
+    print(f"DEBUG: request data = {request.dict()}")
     from cad_generator import generate_cyclone_cad
+    print("DEBUG: cad_generator imported")
 
     output_dir = os.path.join(CAD_EXPORTS_DIR, str(request.RevisionId))
 
     dims = {
+        "RevisionId": request.RevisionId,
         "BarrelDiameterMm": request.BarrelDiameterMm,
         "BarrelHeightMm": request.BarrelHeightMm,
         "ConeHeightMm": request.ConeHeightMm,
@@ -749,16 +747,10 @@ def generate_cad(request: GenerateCadRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"CAD generation failed: {e}")
 
-    # Convert local file paths -> relative URLs under the /cad-exports mount,
-    # same pattern as PngUrl under /renders in the field-prediction result.
-    def _to_url(path):
-        if not path:
-            return None
-        rel = os.path.relpath(path, CAD_EXPORTS_DIR).replace(os.sep, "/")
-        return f"/cad-exports/{rel}"
-
+    # cad_generator.generate_cyclone_cad already returns fully-formatted
+    # URLs (StepUrl/DxfUrl/PdfUrl), so just pass them through.
     return GenerateCadResponse(
-        StepUrl=_to_url(result.get("step_path")),
-        DxfUrl=_to_url(result.get("dxf_path")),
-        PdfUrl=_to_url(result.get("pdf_path")),
+        StepUrl=result.get("StepUrl"),
+        DxfUrl=result.get("DxfUrl"),
+        PdfUrl=result.get("PdfUrl"),
     )
