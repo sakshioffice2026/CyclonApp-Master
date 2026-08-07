@@ -100,7 +100,9 @@ app = FastAPI(title="Cyclone Prediction Service (Physics-Informed)")
 RENDERS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "renders")
 os.makedirs(RENDERS_DIR, exist_ok=True)
 app.mount("/renders", StaticFiles(directory=RENDERS_DIR), name="renders")
-
+CAD_EXPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cad-exports")
+os.makedirs(CAD_EXPORTS_DIR, exist_ok=True)
+app.mount("/cad-exports", StaticFiles(directory=CAD_EXPORTS_DIR), name="cad-exports")
 
 # Job lifecycle / resource-limit config — see module docstring above.
 MAX_CONCURRENT_FIELD_JOBS = 2
@@ -677,3 +679,80 @@ def predict_field_status(job_id: str) -> PredictFieldStatusResponse:
             created_at_unix=job.get("created_at"),
             completed_at_unix=job.get("completed_at"),
         )
+
+
+        # ─────────────────────────────────────────────────────────────────────────
+# CAD GENERATION — synchronous (seconds, not minutes; no job/poll needed,
+# unlike /predict_field). Add this block to app.py, after the existing
+# /predict_field/* routes. Also add near the top of app.py:
+#     from cad_generator import generate_cyclone_cad
+# and add this static mount alongside the existing RENDERS_DIR mount:
+#     CAD_EXPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cad-exports")
+#     os.makedirs(CAD_EXPORTS_DIR, exist_ok=True)
+#     app.mount("/cad-exports", StaticFiles(directory=CAD_EXPORTS_DIR), name="cad-exports")
+# ─────────────────────────────────────────────────────────────────────────
+
+class GenerateCadRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    # PascalCase aliases to match CyclonePredictionRepository.cs's
+    # OutgoingJsonOptions (PropertyNamingPolicy = null), same convention
+    # as PredictFieldStartRequest above.
+    RevisionId: int = Field(..., alias="RevisionId")
+    BarrelDiameterMm: float = Field(..., alias="BarrelDiameterMm")
+    BarrelHeightMm: float = Field(..., alias="BarrelHeightMm")
+    ConeHeightMm: float = Field(..., alias="ConeHeightMm")
+    ExhaustDiaMm: float = Field(..., alias="ExhaustDiaMm")
+    ExhaustLengthMm: float = Field(..., alias="ExhaustLengthMm")
+    BottomOutletMm: float = Field(..., alias="BottomOutletMm")
+    InletHeightMm: float = Field(..., alias="InletHeightMm")
+    InletWidthMm: float = Field(..., alias="InletWidthMm")
+
+
+class GenerateCadResponse(BaseModel):
+    StepUrl: Optional[str] = None
+    DxfUrl: Optional[str] = None
+    PdfUrl: Optional[str] = None
+
+
+@app.post("/generate_cad", response_model=GenerateCadResponse)
+def generate_cad(request: GenerateCadRequest):
+    """
+    Synchronous CAD generation — builds cyclone geometry from dimensions
+    and exports STEP/DXF/PDF. Unlike /predict_field/start, no job store or
+    polling: FreeCAD geometry+export takes seconds, so the HTTP request
+    just waits for the result directly.
+    """
+    from cad_generator import generate_cyclone_cad
+
+    output_dir = os.path.join(CAD_EXPORTS_DIR, str(request.RevisionId))
+
+    dims = {
+        "BarrelDiameterMm": request.BarrelDiameterMm,
+        "BarrelHeightMm": request.BarrelHeightMm,
+        "ConeHeightMm": request.ConeHeightMm,
+        "ExhaustDiaMm": request.ExhaustDiaMm,
+        "ExhaustLengthMm": request.ExhaustLengthMm,
+        "BottomOutletMm": request.BottomOutletMm,
+        "InletHeightMm": request.InletHeightMm,
+        "InletWidthMm": request.InletWidthMm,
+    }
+
+    try:
+        result = generate_cyclone_cad(dims, output_dir)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"CAD generation failed: {e}")
+
+    # Convert local file paths -> relative URLs under the /cad-exports mount,
+    # same pattern as PngUrl under /renders in the field-prediction result.
+    def _to_url(path):
+        if not path:
+            return None
+        rel = os.path.relpath(path, CAD_EXPORTS_DIR).replace(os.sep, "/")
+        return f"/cad-exports/{rel}"
+
+    return GenerateCadResponse(
+        StepUrl=_to_url(result.get("step_path")),
+        DxfUrl=_to_url(result.get("dxf_path")),
+        PdfUrl=_to_url(result.get("pdf_path")),
+    )
