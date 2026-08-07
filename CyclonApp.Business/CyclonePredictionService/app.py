@@ -717,6 +717,12 @@ class GenerateCadResponse(BaseModel):
 
 @app.post("/generate_cad", response_model=GenerateCadResponse)
 def generate_cad(request: GenerateCadRequest):
+    try:
+        print("DEBUG: /generate_cad called")
+        print(f"DEBUG: request data = {request.dict()}")
+        from cad_generator import generate_cyclone_cad
+        print("DEBUG: cad_generator imported")
+def generate_cad(request: GenerateCadRequest):
     """
     Synchronous CAD generation — builds cyclone geometry from dimensions
     and exports STEP/DXF/PDF. Unlike /predict_field/start, no job store or
