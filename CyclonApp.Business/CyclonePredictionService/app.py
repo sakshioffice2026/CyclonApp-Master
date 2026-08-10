@@ -679,18 +679,7 @@ def predict_field_status(job_id: str) -> PredictFieldStatusResponse:
             created_at_unix=job.get("created_at"),
             completed_at_unix=job.get("completed_at"),
         )
-# -----------------------------------------------------------------------
-# REPLACE the entire "CAD GENERATION" block at the bottom of app.py with
-# this version. Data is passed to cad_generator.py via ENVIRONMENT
-# VARIABLES, not command-line arguments - freecadcmd.exe's own argument
-# parser tries to interpret every extra CLI argument as a file to open,
-# which breaks plain string arguments no matter how they're separated.
-# Environment variables avoid that parser entirely.
-#
-# Add near the top of app.py, with the other imports (skip any already
-# present):
-#     import subprocess
-# -----------------------------------------------------------------------
+# ---- CAD GENERATION SECTION (replace lines 695-801 in app.py) ----
 
 import subprocess
 
@@ -725,21 +714,22 @@ class GenerateCadResponse(BaseModel):
 @app.post("/generate_cad", response_model=GenerateCadResponse)
 def generate_cad(request: GenerateCadRequest):
     """
-    Synchronous CAD generation. Runs FreeCAD as a SEPARATE PROCESS
-    (freecadcmd.exe) via subprocess - not an in-process import, since
-    FreeCAD's compiled modules only load inside FreeCAD's own bundled
-    Python interpreter. Input is passed via environment variables (see
-    cad_generator.py's module docstring for why, not CLI args).
+    Synchronous CAD generation. Runs FreeCAD as separate process (freecadcmd.exe)
+    via subprocess - not in-process import, since FreeCAD modules only work inside
+    FreeCAD's bundled Python. Input passed via environment variables (not CLI args).
     """
+    print(f"[CAD] Starting CAD generation request for RevisionId={request.RevisionId}", flush=True)
+    
     if not os.path.isfile(FREECAD_CMD_PATH):
+        print(f"[CAD] ERROR: FreeCAD not found at {FREECAD_CMD_PATH}", flush=True)
         raise HTTPException(
             500,
             f"FreeCAD executable not found at '{FREECAD_CMD_PATH}'. "
-            f"Set the FREECAD_CMD_PATH environment variable to the correct "
-            f"path to freecadcmd.exe.",
+            f"Set FREECAD_CMD_PATH environment variable to correct path.",
         )
 
     output_dir = os.path.join(CAD_EXPORTS_DIR, str(request.RevisionId))
+    print(f"[CAD] Output directory: {output_dir}", flush=True)
 
     dims = {
         "BarrelDiameterMm": request.BarrelDiameterMm,
@@ -751,10 +741,14 @@ def generate_cad(request: GenerateCadRequest):
         "InletHeightMm": request.InletHeightMm,
         "InletWidthMm": request.InletWidthMm,
     }
+    print(f"[CAD] Dimensions: {dims}", flush=True)
 
     env = os.environ.copy()
     env["CAD_DIMS_JSON"] = json.dumps(dims)
     env["CAD_OUTPUT_DIR"] = output_dir
+
+    print(f"[CAD] Calling FreeCAD subprocess: {FREECAD_CMD_PATH}", flush=True)
+    print(f"[CAD] Script: {_CAD_GENERATOR_SCRIPT}", flush=True)
 
     try:
         proc = subprocess.run(
@@ -764,38 +758,62 @@ def generate_cad(request: GenerateCadRequest):
             text=True,
             timeout=120,
         )
-    except subprocess.TimeoutExpired:
-        raise HTTPException(500, "CAD generation timed out after 120s.")
+        print(f"[CAD] Subprocess completed with return code: {proc.returncode}", flush=True)
 
+    except subprocess.TimeoutExpired:
+        print("[CAD] ERROR: Subprocess timed out after 120s", flush=True)
+        raise HTTPException(500, "CAD generation timed out after 120s.")
+    except Exception as e:
+        print(f"[CAD] ERROR: Subprocess execution failed: {e}", flush=True)
+        raise HTTPException(500, f"CAD generation subprocess failed: {e}")
+
+    # Check exit code
     if proc.returncode != 0:
+        print(f"[CAD] ERROR: Non-zero exit code", flush=True)
+        print(f"[CAD] STDOUT:\n{proc.stdout}", flush=True)
+        print(f"[CAD] STDERR:\n{proc.stderr}", flush=True)
         raise HTTPException(
             500,
-            f"CAD generation failed (exit code {proc.returncode}). "
-            f"stderr: {proc.stderr[-2000:]}",
+            f"CAD generation failed (exit {proc.returncode}).\n"
+            f"STDOUT: {proc.stdout}\n"
+            f"STDERR: {proc.stderr}",
         )
 
+    # Look for RESULT_JSON marker in stdout
+    print(f"[CAD] Parsing result from stdout ({len(proc.stdout)} chars)...", flush=True)
     result = None
     for line in proc.stdout.splitlines():
         if line.startswith("RESULT_JSON:"):
-            result = json.loads(line[len("RESULT_JSON:"):])
+            try:
+                result = json.loads(line[len("RESULT_JSON:"):])
+                print(f"[CAD] Result parsed: {result.keys()}", flush=True)
+            except json.JSONDecodeError as e:
+                print(f"[CAD] ERROR: Failed to parse RESULT_JSON: {e}", flush=True)
             break
 
     if result is None:
+        print(f"[CAD] ERROR: No RESULT_JSON marker found in stdout", flush=True)
+        print(f"[CAD] STDOUT:\n{proc.stdout}", flush=True)
+        print(f"[CAD] STDERR:\n{proc.stderr}", flush=True)
         raise HTTPException(
             500,
-            f"CAD generation produced no result. "
-            f"stdout: {proc.stdout[-2000:]} stderr: {proc.stderr[-2000:]}",
+            f"CAD generation produced no result.\n"
+            f"STDOUT: {proc.stdout}\n"
+            f"STDERR: {proc.stderr}",
         )
 
+    # Convert file paths to URLs
     def _to_url(path):
         if not path:
             return None
         rel = os.path.relpath(path, CAD_EXPORTS_DIR).replace(os.sep, "/")
         return f"/cad-exports/{rel}"
 
-    return GenerateCadResponse(
+    response = GenerateCadResponse(
         StepUrl=_to_url(result.get("step_path")),
         DxfUrl=_to_url(result.get("dxf_path")),
         PdfUrl=_to_url(result.get("pdf_path")),
         ObjUrl=_to_url(result.get("obj_path")),
     )
+    print(f"[CAD] Success! Response: {response}", flush=True)
+    return response
