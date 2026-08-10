@@ -142,6 +142,13 @@ def _build_cyclone_shape(dims_mm: dict):
     openings: Air In (inlet duct end), Air Out (top of the vortex-finder
     pipe), and Dust Outlet (bottom tip of the cone). A bolted flange is
     then welded onto each of those 3 openings for real ducting connections.
+
+    Returns (final_shape, sections) where sections is a dict of the
+    individual PRE-FUSE solid pieces {"barrel", "cone", "inlet_duct",
+    "air_out_pipe", "dust_outlet_pipe"} - used only for the new
+    per-section 2D DXF export (generate_cyclone_cad). The combined
+    final_shape / STEP / OBJ / single-view DXF+PDF path is completely
+    unchanged from before.
     """
     barrel_d = dims_mm["BarrelDiameterMm"]
     barrel_h = dims_mm["BarrelHeightMm"]
@@ -273,11 +280,26 @@ def _build_cyclone_shape(dims_mm: dict):
 
     final_shape = shell.fuse(air_out_flange).fuse(dust_outlet_flange).fuse(inlet_flange)
 
-    return final_shape
+    # ---- NEW: individual section shapes for per-section 2D DXFs -------
+    # Solid (pre-shell) representative shapes - fine for 2D outline
+    # drawings, which show the silhouette/outline, not wall thickness.
+    # Each pipe/duct section includes its own flange fused on, since a
+    # real fabrication drawing for that part would show the flange too.
+    sections = {
+        "barrel": barrel,
+        "cone": cone,
+        "air_out_pipe": exhaust_pipe.fuse(air_out_flange),
+        "dust_outlet_pipe": dust_pipe.fuse(dust_outlet_flange),
+        "inlet_duct": inlet_box.fuse(inlet_flange),
+    }
+
+    return final_shape, sections
 
 
-# ---- TechDraw 2D export -------------------------------------------------
+# ---- TechDraw 2D export (ORIGINAL - unchanged) ---------------------------
 def _export_techdraw(doc, shape_obj, output_dir: str, base_name: str):
+    """Original single front-view export. Untouched - still produces the
+    combined cyclone.pdf / cyclone.dxf exactly as before."""
     page = doc.addObject("TechDraw::DrawPage", "Page")
     template = doc.addObject("TechDraw::DrawSVGTemplate", "Template")
 
@@ -319,15 +341,94 @@ def _export_techdraw(doc, shape_obj, output_dir: str, base_name: str):
     return pdf_path, dxf_path
 
 
+# ---- NEW: single-direction flattened 2D DXF (used by both new features) --
+def _export_view_dxf(doc, shape, direction_vec, output_dir: str, filename: str):
+    """
+    Exports ONE flattened 2D orthographic view of `shape` (looking along
+    direction_vec) as its own DXF file. Tries TechDraw's headless
+    projection writer first (a true flattened 2D view, correct for real
+    orthographic drawings); falls back to the old raw-3D-wireframe
+    importDXF.export used elsewhere in this file if that's unavailable on
+    this FreeCAD build - same defensive try/except pattern as the rest of
+    this module, so this never hard-crashes CAD generation.
+    """
+    dxf_path = os.path.join(output_dir, filename)
+    tmp_obj = doc.addObject("Part::Feature", f"Tmp_{filename.replace('.', '_')}")
+    tmp_obj.Shape = shape
+    page = doc.addObject("TechDraw::DrawPage", f"Page_{filename.replace('.', '_')}")
+    template = doc.addObject("TechDraw::DrawSVGTemplate", f"Tpl_{filename.replace('.', '_')}")
+    resource_dir = FreeCAD.getResourceDir()
+    template_path = os.path.join(
+        resource_dir, "Mod", "TechDraw", "Templates", "A3_Landscape.svg"
+    )
+    if os.path.isfile(template_path):
+        template.Template = template_path
+    page.Template = template
+
+    view = doc.addObject("TechDraw::DrawViewPart", f"View_{filename.replace('.', '_')}")
+    view.Source = [tmp_obj]
+    view.Direction = direction_vec
+    page.addView(view)
+    doc.recompute()
+
+    try:
+        # Headless flattened-projection DXF writer (no GUI needed, unlike
+        # TechDrawGui's PDF export).
+        TechDraw.writeDXFView(view, dxf_path)
+    except Exception as e:
+        print(
+            f"WARNING: TechDraw.writeDXFView failed for {filename} "
+            f"({e}) - falling back to raw 3D wireframe export.",
+            file=sys.stderr,
+        )
+        try:
+            import importDXF
+            importDXF.export([shape], dxf_path)
+        except Exception as e2:
+            print(f"WARNING: fallback DXF export also failed for {filename}: {e2}", file=sys.stderr)
+            dxf_path = None
+
+    # Clean up the temp page/view/object so pages don't pile up in the
+    # document across many section/view exports.
+    for obj in (page, template, view, tmp_obj):
+        try:
+            doc.removeObject(obj.Name)
+        except Exception:
+            pass
+
+    return dxf_path
+
+
+def _export_multi_view_dxfs(doc, shape, output_dir: str, base_name: str) -> dict:
+    """NEW: Front / Top / Side views of the WHOLE assembly, each its own DXF."""
+    views = {
+        "front": FreeCAD.Vector(0, -1, 0),
+        "top": FreeCAD.Vector(0, 0, -1),
+        "side": FreeCAD.Vector(1, 0, 0),
+    }
+    result = {}
+    for name, direction in views.items():
+        filename = f"{base_name}_{name}.dxf"
+        result[name] = _export_view_dxf(doc, shape, direction, output_dir, filename)
+    return result
+
+
+def _export_section_dxfs(doc, sections: dict, output_dir: str) -> dict:
+    """NEW: one DXF per physical section (front view each)."""
+    result = {}
+    for name, shape in sections.items():
+        filename = f"{name}.dxf"
+        result[name] = _export_view_dxf(
+            doc, shape, FreeCAD.Vector(0, -1, 0), output_dir, filename
+        )
+    return result
+
+
 # ---- 3D mesh export (OBJ, browser-viewable, headless-compatible) --------
 def _export_obj_mesh(shape, output_dir: str, base_name: str):
     obj_path = os.path.join(output_dir, f"{base_name}.obj")
     try:
         doc_mesh = Mesh.Mesh(shape.tessellate(0.5))  # 0.5mm max deviation
-        # Weld tessellation seams between adjacent BREP faces so the
-        # exported mesh isn't falsely reported as fragmented/non-watertight
-        # by downstream viewers - this is an export-quality fix, not a
-        # geometry fix.
         doc_mesh.removeDuplicatedPoints()
         doc_mesh.removeDuplicatedFacets()
         doc_mesh.write(obj_path)
@@ -342,7 +443,7 @@ def generate_cyclone_cad(dimensions_mm: dict, output_dir: str) -> dict:
     os.makedirs(output_dir, exist_ok=True)
 
     doc = FreeCAD.newDocument("Cyclone")
-    shape = _build_cyclone_shape(dimensions_mm)
+    shape, sections = _build_cyclone_shape(dimensions_mm)
 
     shape_obj = doc.addObject("Part::Feature", "CycloneBody")
     shape_obj.Shape = shape
@@ -362,7 +463,14 @@ def generate_cyclone_cad(dimensions_mm: dict, output_dir: str) -> dict:
 
     obj_path = _export_obj_mesh(shape, output_dir, base_name)
 
+    # ORIGINAL combined single-view export - unchanged.
     pdf_path, dxf_path = _export_techdraw(doc, shape_obj, output_dir, base_name)
+
+    # NEW: multi-view (Front/Top/Side) of the whole assembly.
+    view_dxf_paths = _export_multi_view_dxfs(doc, shape, output_dir, base_name)
+
+    # NEW: one DXF per physical section.
+    section_dxf_paths = _export_section_dxfs(doc, sections, output_dir)
 
     FreeCAD.closeDocument(doc.Name)
 
@@ -371,6 +479,8 @@ def generate_cyclone_cad(dimensions_mm: dict, output_dir: str) -> dict:
         "pdf_path": pdf_path,
         "dxf_path": dxf_path,
         "obj_path": obj_path,
+        "views": view_dxf_paths,        # {"front":..., "top":..., "side":...}
+        "sections": section_dxf_paths,  # {"barrel":..., "cone":..., ...}
     }
 
 
