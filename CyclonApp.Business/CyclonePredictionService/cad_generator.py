@@ -1,14 +1,42 @@
 """
-cad_generator.py - Headless FreeCAD geometry + drawing generator for CyclonApp.
+cad_generator.py
+-----------------
+Headless FreeCAD geometry + drawing generator for CyclonApp.
+
+Place this file inside: CyclonApp.Business/CyclonePredictionService/
+
+IMPORTANT: run via FreeCAD's own Python (freecadcmd.exe), NOT imported
+from a regular Python process. FreeCAD's native modules are built
+against FreeCAD's own bundled Python and will fail with "Module use of
+pythonXXX.dll conflicts with this version of Python" if imported into a
+different interpreter (e.g. the uvicorn/FastAPI process).
+
+Input is passed via ENVIRONMENT VARIABLES, not command-line arguments.
+freecadcmd.exe's own argument parser tries to interpret every extra
+command-line argument as a file to open, which breaks plain string
+arguments (dims JSON, output path) - environment variables sidestep
+that parser entirely.
+
+    CAD_DIMS_JSON  = JSON string of the 8 dimension fields (mm)
+    CAD_OUTPUT_DIR = folder to write step/dxf/pdf into
+
+Usage from app.py (via subprocess):
+    env = os.environ.copy()
+    env["CAD_DIMS_JSON"] = json.dumps(dims)
+    env["CAD_OUTPUT_DIR"] = output_dir
+    subprocess.run([FREECAD_CMD_PATH, "cad_generator.py"], env=env, ...)
+
+Standalone test (no env vars set -> uses built-in sample dimensions):
+    freecadcmd.exe cad_generator.py
 """
 
 from __future__ import annotations
 import os
 import sys
 import json
-import traceback
 
 
+# ---- Locate FreeCAD's Python modules --------------------------------
 def _add_freecad_to_path():
     if os.name == "nt":
         candidates = [
@@ -20,44 +48,27 @@ def _add_freecad_to_path():
             if path and os.path.isdir(path):
                 sys.path.append(path)
                 return
+    # On Linux/inside freecadcmd, FreeCAD is already importable - no-op.
 
 
 _add_freecad_to_path()
 
-print("DEBUG: Starting FreeCAD imports...", file=sys.stderr, flush=True)
-
-try:
-    import FreeCAD
-    print("DEBUG: FreeCAD imported OK", file=sys.stderr, flush=True)
-except Exception as e:
-    print(f"FATAL: FreeCAD import failed: {e}", file=sys.stderr, flush=True)
-    sys.exit(1)
-
-try:
-    import Part
-    print("DEBUG: Part imported OK", file=sys.stderr, flush=True)
-except Exception as e:
-    print(f"FATAL: Part import failed: {e}", file=sys.stderr, flush=True)
-    sys.exit(1)
-
-TechDraw = None
-try:
-    import TechDraw
-    print("DEBUG: TechDraw imported OK", file=sys.stderr, flush=True)
-except Exception as e:
-    print(f"WARNING: TechDraw import failed: {e}", file=sys.stderr, flush=True)
-
-Mesh = None
-try:
-    import Mesh
-    print("DEBUG: Mesh imported OK", file=sys.stderr, flush=True)
-except Exception as e:
-    print(f"WARNING: Mesh import failed: {e}", file=sys.stderr, flush=True)
-
-print("DEBUG: All imports complete", file=sys.stderr, flush=True)
+import FreeCAD
+import Part
+import TechDraw
+import Mesh
 
 
+# ---- Geometry builder -------------------------------------------------
 def _build_cyclone_shape(dims_mm: dict):
+    """
+    Builds a simple axisymmetric cyclone body:
+      - Barrel: cylinder
+      - Cone: tapered cone below barrel
+      - Exhaust (vortex finder): cylinder from top, into barrel
+      - Inlet: rectangular box, positioned tangentially at barrel top
+    Units: FreeCAD's Part primitives use mm natively.
+    """
     barrel_d = dims_mm["BarrelDiameterMm"]
     barrel_h = dims_mm["BarrelHeightMm"]
     cone_h = dims_mm["ConeHeightMm"]
@@ -68,182 +79,169 @@ def _build_cyclone_shape(dims_mm: dict):
     inlet_w = dims_mm["InletWidthMm"]
 
     barrel_r = barrel_d / 2.0
+
     barrel = Part.makeCylinder(barrel_r, barrel_h)
+
+    # radius1 (barrel_r) sits AT position (0,0,0) - the wide face touching
+    # the barrel's bottom. Direction (0,0,-1) extrudes DOWNWARD by cone_h,
+    # so radius2 (bottom_outlet/2, the narrow dust-outlet tip) ends up at
+    # z=-cone_h. Previously position was (0,0,-cone_h) with direction
+    # (0,0,1), which put the wide face at the bottom and the narrow tip at
+    # the top - an upside-down cone.
     cone = Part.makeCone(
         barrel_r,
         bottom_outlet / 2.0,
         cone_h,
-        FreeCAD.Vector(0, 0, -cone_h),
-        FreeCAD.Vector(0, 0, 1),
+        FreeCAD.Vector(0, 0, 0),
+        FreeCAD.Vector(0, 0, -1),
     )
+
     body = barrel.fuse(cone)
+
     exhaust = Part.makeCylinder(
         exhaust_d / 2.0,
         exhaust_l + 50,
         FreeCAD.Vector(0, 0, barrel_h - exhaust_l),
         FreeCAD.Vector(0, 0, 1),
     )
+
     body = body.cut(exhaust)
+
+    # Tangential inlet: previously this box was centered on the X-axis
+    # (x from -inlet_w/2 to +inlet_w/2), which points the duct straight at
+    # the barrel's center - a radial inlet. A real cyclone needs a
+    # TANGENTIAL inlet: offset sideways so the duct's outer wall just
+    # touches the barrel circle at (barrel_r, 0) and gas enters running
+    # along the wall (in the -Y direction), not aimed at the axis. That
+    # tangential entry is what creates the swirling vortex the whole
+    # separation process depends on.
     inlet_box = Part.makeBox(
         inlet_w,
         barrel_r * 1.5,
         inlet_h,
-        FreeCAD.Vector(-inlet_w / 2.0, -barrel_r * 1.5, barrel_h - inlet_h - 20),
+        FreeCAD.Vector(barrel_r - inlet_w, -barrel_r * 1.5, barrel_h - inlet_h - 20),
     )
     inlet_cut = inlet_box.common(Part.makeCylinder(barrel_r + 1, barrel_h))
     body = body.fuse(inlet_box.cut(inlet_cut))
+
     return body
 
 
+# ---- TechDraw 2D export -------------------------------------------------
 def _export_techdraw(doc, shape_obj, output_dir: str, base_name: str):
-    if TechDraw is None:
-        print("WARNING: Skipping TechDraw export (module not available)", file=sys.stderr, flush=True)
-        return None, None
+    page = doc.addObject("TechDraw::DrawPage", "Page")
+    template = doc.addObject("TechDraw::DrawSVGTemplate", "Template")
+
+    resource_dir = FreeCAD.getResourceDir()
+    template_path = os.path.join(
+        resource_dir, "Mod", "TechDraw", "Templates", "A3_Landscape.svg"
+    )
+    if os.path.isfile(template_path):
+        template.Template = template_path
+    page.Template = template
+
+    view = doc.addObject("TechDraw::DrawViewPart", "FrontView")
+    view.Source = [shape_obj]
+    view.Direction = FreeCAD.Vector(0, -1, 0)
+    page.addView(view)
+
+    doc.recompute()
+
+    pdf_path = os.path.join(output_dir, f"{base_name}.pdf")
+    dxf_path = os.path.join(output_dir, f"{base_name}.dxf")
+
+    # freecadcmd.exe has no GUI, so TechDrawGui (needed for PDF export)
+    # is not available here. PDF stays None when run this way - expected,
+    # not an error. STEP + DXF are the primary deliverables.
+    try:
+        import TechDrawGui
+        TechDrawGui.exportPageAsPdf(page, pdf_path)
+    except Exception as e:
+        print(f"WARNING: PDF export skipped (needs FreeCAD GUI modules): {e}", file=sys.stderr)
+        pdf_path = None
 
     try:
-        print("DEBUG: Creating TechDraw page...", file=sys.stderr, flush=True)
-        page = doc.addObject("TechDraw::DrawPage", "Page")
-        template = doc.addObject("TechDraw::DrawSVGTemplate", "Template")
-
-        resource_dir = FreeCAD.getResourceDir()
-        template_path = os.path.join(
-            resource_dir, "Mod", "TechDraw", "Templates", "A3_Landscape.svg"
-        )
-        if os.path.isfile(template_path):
-            template.Template = template_path
-        page.Template = template
-
-        view = doc.addObject("TechDraw::DrawViewPart", "FrontView")
-        view.Source = [shape_obj]
-        view.Direction = FreeCAD.Vector(0, -1, 0)
-        page.addView(view)
-
-        doc.recompute()
-        print("DEBUG: TechDraw page created", file=sys.stderr, flush=True)
-
-        pdf_path = os.path.join(output_dir, f"{base_name}.pdf")
-        dxf_path = os.path.join(output_dir, f"{base_name}.dxf")
-
-        try:
-            import TechDrawGui
-            TechDrawGui.exportPageAsPdf(page, pdf_path)
-            print(f"DEBUG: PDF exported", file=sys.stderr, flush=True)
-        except Exception as e:
-            print(f"WARNING: PDF export failed: {e}", file=sys.stderr, flush=True)
-            pdf_path = None
-
-        try:
-            import importDXF
-            importDXF.export([shape_obj], dxf_path)
-            print(f"DEBUG: DXF exported", file=sys.stderr, flush=True)
-        except Exception as e:
-            print(f"WARNING: DXF export failed: {e}", file=sys.stderr, flush=True)
-            dxf_path = None
-
-        return pdf_path, dxf_path
-
+        import importDXF
+        importDXF.export([shape_obj], dxf_path)
     except Exception as e:
-        print(f"ERROR in TechDraw: {e}", file=sys.stderr, flush=True)
-        return None, None
+        print(f"WARNING: DXF export failed: {e}", file=sys.stderr)
+        dxf_path = None
+
+    return pdf_path, dxf_path
 
 
+# ---- 3D mesh export (OBJ, browser-viewable, headless-compatible) --------
 def _export_obj_mesh(shape, output_dir: str, base_name: str):
-    if Mesh is None:
-        print("WARNING: Skipping OBJ export (Mesh unavailable)", file=sys.stderr, flush=True)
-        return None
-
+    """
+    Tessellates the solid into a triangle mesh and exports OBJ. Unlike
+    STEP (exact B-rep, not directly renderable in a browser) or PDF/DXF
+    (needs GUI modules), OBJ export works fully headless via the Mesh
+    module and can be loaded straight into Three.js / <model-viewer>
+    (convert OBJ -> glTF client-side, or serve OBJ directly with an
+    OBJLoader on the frontend).
+    """
     obj_path = os.path.join(output_dir, f"{base_name}.obj")
     try:
-        print("DEBUG: Tessellating mesh...", file=sys.stderr, flush=True)
-        doc_mesh = Mesh.Mesh(shape.tessellate(0.5))
+        doc_mesh = Mesh.Mesh(shape.tessellate(0.5))  # 0.5mm max deviation
         doc_mesh.write(obj_path)
-        print(f"DEBUG: OBJ exported", file=sys.stderr, flush=True)
-        return obj_path
     except Exception as e:
-        print(f"WARNING: OBJ export failed: {e}", file=sys.stderr, flush=True)
-        return None
+        print(f"WARNING: OBJ mesh export failed: {e}", file=sys.stderr)
+        obj_path = None
+    return obj_path
 
 
+# ---- Public entry point -------------------------------------------------
 def generate_cyclone_cad(dimensions_mm: dict, output_dir: str) -> dict:
-    print("DEBUG: generate_cyclone_cad() entered", file=sys.stderr, flush=True)
     os.makedirs(output_dir, exist_ok=True)
-    print("DEBUG: Output dir created", file=sys.stderr, flush=True)
 
-    print("DEBUG: Creating FreeCAD doc...", file=sys.stderr, flush=True)
     doc = FreeCAD.newDocument("Cyclone")
-    print("DEBUG: Doc created", file=sys.stderr, flush=True)
-
-    print("DEBUG: Building shape...", file=sys.stderr, flush=True)
     shape = _build_cyclone_shape(dimensions_mm)
-    print("DEBUG: Shape built", file=sys.stderr, flush=True)
 
     shape_obj = doc.addObject("Part::Feature", "CycloneBody")
     shape_obj.Shape = shape
     doc.recompute()
-    print("DEBUG: Doc recomputed", file=sys.stderr, flush=True)
 
     base_name = "cyclone"
     step_path = os.path.join(output_dir, f"{base_name}.step")
-    print("DEBUG: Exporting STEP...", file=sys.stderr, flush=True)
     Part.export([shape_obj], step_path)
-    print("DEBUG: STEP exported", file=sys.stderr, flush=True)
 
-    print("DEBUG: Exporting OBJ...", file=sys.stderr, flush=True)
     obj_path = _export_obj_mesh(shape, output_dir, base_name)
-    print("DEBUG: OBJ export done", file=sys.stderr, flush=True)
 
-    print("DEBUG: Exporting TechDraw...", file=sys.stderr, flush=True)
     pdf_path, dxf_path = _export_techdraw(doc, shape_obj, output_dir, base_name)
-    print("DEBUG: TechDraw export done", file=sys.stderr, flush=True)
 
-    print("DEBUG: Closing doc...", file=sys.stderr, flush=True)
     FreeCAD.closeDocument(doc.Name)
-    print("DEBUG: Doc closed", file=sys.stderr, flush=True)
 
-    result = {
+    return {
         "step_path": step_path,
         "pdf_path": pdf_path,
         "dxf_path": dxf_path,
         "obj_path": obj_path,
     }
-    print("DEBUG: Result dict created, returning", file=sys.stderr, flush=True)
-    return result
 
 
+# ---- Entry point: reads input from environment variables ----------------
 if __name__ == "__main__":
-    print("DEBUG: __main__ block started", file=sys.stderr, flush=True)
-    try:
-        dims_json = os.environ.get("CAD_DIMS_JSON")
-        out_dir = os.environ.get("CAD_OUTPUT_DIR")
-        print(f"DEBUG: Got env vars. dims_json={bool(dims_json)}, out_dir={out_dir}", file=sys.stderr, flush=True)
+    dims_json = os.environ.get("CAD_DIMS_JSON")
+    out_dir = os.environ.get("CAD_OUTPUT_DIR")
 
-        if dims_json and out_dir:
-            print("DEBUG: Parsing JSON...", file=sys.stderr, flush=True)
-            dims = json.loads(dims_json)
-            print("DEBUG: JSON parsed", file=sys.stderr, flush=True)
-        else:
-            print("DEBUG: Using test dimensions", file=sys.stderr, flush=True)
-            dims = {
-                "BarrelDiameterMm": 300,
-                "BarrelHeightMm": 450,
-                "ConeHeightMm": 600,
-                "ExhaustDiaMm": 150,
-                "ExhaustLengthMm": 180,
-                "BottomOutletMm": 100,
-                "InletHeightMm": 150,
-                "InletWidthMm": 60,
-            }
-            out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cad-exports", "test")
+    if dims_json and out_dir:
+        dims = json.loads(dims_json)
+    else:
+        # Standalone manual test with built-in sample dimensions.
+        dims = {
+            "BarrelDiameterMm": 300,
+            "BarrelHeightMm": 450,
+            "ConeHeightMm": 600,
+            "ExhaustDiaMm": 150,
+            "ExhaustLengthMm": 180,
+            "BottomOutletMm": 100,
+            "InletHeightMm": 150,
+            "InletWidthMm": 60,
+        }
+        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cad-exports", "test")
 
-        print("DEBUG: Calling generate_cyclone_cad...", file=sys.stderr, flush=True)
-        result = generate_cyclone_cad(dims, out_dir)
-        print("DEBUG: generate_cyclone_cad returned", file=sys.stderr, flush=True)
-
-        print("DEBUG: Printing RESULT_JSON...", file=sys.stderr, flush=True)
-        print("RESULT_JSON:" + json.dumps(result), flush=True)
-        print("DEBUG: RESULT_JSON printed", file=sys.stderr, flush=True)
-
-    except Exception as e:
-        print(f"ERROR: {e}", file=sys.stderr, flush=True)
-        print(traceback.format_exc(), file=sys.stderr, flush=True)
-        sys.exit(1)
+    result = generate_cyclone_cad(dims, out_dir)
+    # Prefixed marker line so app.py can reliably find the result even if
+    # FreeCAD prints extra diagnostic lines (Recompute..., transfer stats,
+    # etc.) to stdout before this.
+    print("RESULT_JSON:" + json.dumps(result))

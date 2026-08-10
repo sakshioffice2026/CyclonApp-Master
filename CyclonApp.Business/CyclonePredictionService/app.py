@@ -751,8 +751,11 @@ def generate_cad(request: GenerateCadRequest):
     print(f"[CAD] Script: {_CAD_GENERATOR_SCRIPT}", flush=True)
 
     try:
+        exec_code = (
+            f"exec(open(r'{_CAD_GENERATOR_SCRIPT}', encoding='utf-8-sig').read())"
+        )
         proc = subprocess.run(
-            [FREECAD_CMD_PATH, _CAD_GENERATOR_SCRIPT],
+            [FREECAD_CMD_PATH, "-c", exec_code],
             env=env,
             capture_output=True,
             text=True,
