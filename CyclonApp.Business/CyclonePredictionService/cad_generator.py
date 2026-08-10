@@ -61,7 +61,7 @@ import Mesh
 
 
 # ---- Flange builders ----------------------------------------------------
-def _round_flange(radius_inner, z, extend_up, flange_t, flange_width, bolt_dia, bolt_count):
+def _round_flange(radius_inner, z, extend_up, flange_t, flange_width, bolt_dia, bolt_count, overlap=5.0):
     """
     Flat annular ring flange for a round pipe end.
     radius_inner = pipe's OUTER radius (the flange's bore matches the
@@ -72,14 +72,23 @@ def _round_flange(radius_inner, z, extend_up, flange_t, flange_width, bolt_dia, 
                    welded on top of the pipe end);
                    False -> flange body extends from z downward (Dust
                    Outlet, welded below the pipe end).
+    overlap      = extra mm the flange reaches BACK into the existing
+                   pipe wall (past z, into the shell). Without this the
+                   flange only touches the shell along a zero-volume
+                   ring and Part.fuse() leaves it as a separate
+                   disconnected solid (confirmed via BRepCheck: 4 solids
+                   instead of 1) - a flange that's only "touching", not
+                   welded, is not a valid mechanical part. The overlap
+                   gives fuse() a real shared volume to merge on.
     """
     radius_outer = radius_inner + flange_width
-    z0 = z if extend_up else z - flange_t
+    height = flange_t + overlap
+    z0 = (z - overlap) if extend_up else (z - flange_t)
     direction = FreeCAD.Vector(0, 0, 1)
 
-    outer_disc = Part.makeCylinder(radius_outer, flange_t, FreeCAD.Vector(0, 0, z0), direction)
+    outer_disc = Part.makeCylinder(radius_outer, height, FreeCAD.Vector(0, 0, z0), direction)
     inner_hole = Part.makeCylinder(
-        radius_inner, flange_t + 2, FreeCAD.Vector(0, 0, z0 - 1), direction
+        radius_inner, height + 2, FreeCAD.Vector(0, 0, z0 - 1), direction
     )
     flange = outer_disc.cut(inner_hole)
 
@@ -89,31 +98,34 @@ def _round_flange(radius_inner, z, extend_up, flange_t, flange_width, bolt_dia, 
         bx = bolt_circle_r * math.cos(ang)
         by = bolt_circle_r * math.sin(ang)
         bolt = Part.makeCylinder(
-            bolt_dia / 2.0, flange_t + 2, FreeCAD.Vector(bx, by, z0 - 1), direction
+            bolt_dia / 2.0, height + 2, FreeCAD.Vector(bx, by, z0 - 1), direction
         )
         flange = flange.cut(bolt)
 
     return flange
 
 
-def _rect_flange(center_x, center_z, y, inner_w, inner_h, flange_t, flange_width, bolt_dia):
+def _rect_flange(center_x, center_z, y, inner_w, inner_h, flange_t, flange_width, bolt_dia, overlap=5.0):
     """
     Flat rectangular plate flange for the inlet duct's far end.
     inner_w/inner_h = the duct's OUTER cross-section (its bore matches
     the duct's outer footprint exactly - same flush-fit logic as the
     round flange). y = the duct end's y-coordinate (its open face);
-    the plate extends further out in -Y beyond it.
+    the plate extends further out in -Y beyond it, and 'overlap' mm
+    back INTO the duct wall so fuse() has real shared volume to merge
+    on (same reasoning as _round_flange's overlap param).
     """
     outer_w = inner_w + 2.0 * flange_width
     outer_h = inner_h + 2.0 * flange_width
+    depth = flange_t + overlap
     y0 = y - flange_t
 
     plate = Part.makeBox(
-        outer_w, flange_t, outer_h,
+        outer_w, depth, outer_h,
         FreeCAD.Vector(center_x - outer_w / 2.0, y0, center_z - outer_h / 2.0),
     )
     hole = Part.makeBox(
-        inner_w, flange_t + 2, inner_h,
+        inner_w, depth + 2, inner_h,
         FreeCAD.Vector(center_x - inner_w / 2.0, y0 - 1, center_z - inner_h / 2.0),
     )
     flange = plate.cut(hole)
@@ -124,7 +136,7 @@ def _rect_flange(center_x, center_z, y, inner_w, inner_h, flange_t, flange_width
             bx = center_x + sx * (outer_w / 2.0 - margin)
             bz = center_z + sz * (outer_h / 2.0 - margin)
             bolt = Part.makeCylinder(
-                bolt_dia / 2.0, flange_t + 2, FreeCAD.Vector(bx, y0 - 1, bz),
+                bolt_dia / 2.0, depth + 2, FreeCAD.Vector(bx, y0 - 1, bz),
                 FreeCAD.Vector(0, 1, 0),
             )
             flange = flange.cut(bolt)
@@ -168,6 +180,7 @@ def _build_cyclone_shape(dims_mm: dict):
     flange_width = dims_mm.get("FlangeWidthMm", 25.0)       # radial/lateral margin beyond the pipe/duct OD
     bolt_dia = dims_mm.get("FlangeBoltHoleDiaMm", 12.0)
     bolt_count_round = int(dims_mm.get("FlangeBoltCountRound", 4))
+    flange_overlap = dims_mm.get("FlangeOverlapMm", 5.0)
 
     barrel_r = barrel_d / 2.0
 
@@ -265,17 +278,17 @@ def _build_cyclone_shape(dims_mm: dict):
     air_out_flange = _round_flange(
         radius_inner=pipe_r, z=exhaust_top_z, extend_up=True,
         flange_t=flange_t, flange_width=flange_width,
-        bolt_dia=bolt_dia, bolt_count=bolt_count_round,
+        bolt_dia=bolt_dia, bolt_count=bolt_count_round, overlap=flange_overlap,
     )
     dust_outlet_flange = _round_flange(
         radius_inner=bottom_outlet / 2.0, z=dust_pipe_bottom_z, extend_up=False,
         flange_t=flange_t, flange_width=flange_width,
-        bolt_dia=bolt_dia, bolt_count=bolt_count_round,
+        bolt_dia=bolt_dia, bolt_count=bolt_count_round, overlap=flange_overlap,
     )
     inlet_flange = _rect_flange(
         center_x=duct_center_x, center_z=duct_center_z, y=duct_far_y,
         inner_w=inlet_w, inner_h=inlet_h,
-        flange_t=flange_t, flange_width=flange_width, bolt_dia=bolt_dia,
+        flange_t=flange_t, flange_width=flange_width, bolt_dia=bolt_dia, overlap=flange_overlap,
     )
 
     final_shape = shell.fuse(air_out_flange).fuse(dust_outlet_flange).fuse(inlet_flange)
