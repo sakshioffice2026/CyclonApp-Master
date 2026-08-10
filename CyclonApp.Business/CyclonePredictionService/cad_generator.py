@@ -2,21 +2,42 @@
 cad_generator.py
 -----------------
 Headless FreeCAD geometry + drawing generator for CyclonApp.
-Same usage/env-var contract as before. Only _build_cyclone_shape changed:
-body is now a HOLLOW SHEET-METAL SHELL (wall thickness = SheetThicknessMm),
-not a solid, matching the "Hollow Sheet Metal" note in the design sketch.
 
-    CAD_DIMS_JSON  = JSON string of dimension fields (mm), now includes
-                     optional "SheetThicknessMm" (default 3mm)
-    CAD_OUTPUT_DIR = folder to write step/dxf/obj/pdf into
+Place this file inside: CyclonApp.Business/CyclonePredictionService/
+
+IMPORTANT: run via FreeCAD's own Python (freecadcmd.exe), NOT imported
+from a regular Python process. FreeCAD's native modules are built
+against FreeCAD's own bundled Python and will fail with "Module use of
+pythonXXX.dll conflicts with this version of Python" if imported into a
+different interpreter (e.g. the uvicorn/FastAPI process).
+
+Input is passed via ENVIRONMENT VARIABLES, not command-line arguments.
+freecadcmd.exe's own argument parser tries to interpret every extra
+command-line argument as a file to open, which breaks plain string
+arguments (dims JSON, output path) - environment variables sidestep
+that parser entirely.
+
+    CAD_DIMS_JSON  = JSON string of the dimension fields (mm)
+    CAD_OUTPUT_DIR = folder to write step/dxf/pdf into
+
+Usage from app.py (via subprocess):
+    env = os.environ.copy()
+    env["CAD_DIMS_JSON"] = json.dumps(dims)
+    env["CAD_OUTPUT_DIR"] = output_dir
+    subprocess.run([FREECAD_CMD_PATH, "cad_generator.py"], env=env, ...)
+
+Standalone test (no env vars set -> uses built-in sample dimensions):
+    freecadcmd.exe cad_generator.py
 """
 
 from __future__ import annotations
 import os
 import sys
 import json
+import math
 
 
+# ---- Locate FreeCAD's Python modules --------------------------------
 def _add_freecad_to_path():
     if os.name == "nt":
         candidates = [
@@ -28,6 +49,7 @@ def _add_freecad_to_path():
             if path and os.path.isdir(path):
                 sys.path.append(path)
                 return
+    # On Linux/inside freecadcmd, FreeCAD is already importable - no-op.
 
 
 _add_freecad_to_path()
@@ -38,19 +60,88 @@ import TechDraw
 import Mesh
 
 
-# ---- Geometry builder (HOLLOW SHELL) -----------------------------------
+# ---- Flange builders ----------------------------------------------------
+def _round_flange(radius_inner, z, extend_up, flange_t, flange_width, bolt_dia, bolt_count):
+    """
+    Flat annular ring flange for a round pipe end.
+    radius_inner = pipe's OUTER radius (the flange's bore matches the
+    pipe's outer surface exactly, so it sits flush - no cap, no
+    obstruction to the bore that's already open inside the pipe wall).
+    z            = the pipe end's z-coordinate (its open face).
+    extend_up    = True -> flange body extends from z upward (Air Out,
+                   welded on top of the pipe end);
+                   False -> flange body extends from z downward (Dust
+                   Outlet, welded below the pipe end).
+    """
+    radius_outer = radius_inner + flange_width
+    z0 = z if extend_up else z - flange_t
+    direction = FreeCAD.Vector(0, 0, 1)
+
+    outer_disc = Part.makeCylinder(radius_outer, flange_t, FreeCAD.Vector(0, 0, z0), direction)
+    inner_hole = Part.makeCylinder(
+        radius_inner, flange_t + 2, FreeCAD.Vector(0, 0, z0 - 1), direction
+    )
+    flange = outer_disc.cut(inner_hole)
+
+    bolt_circle_r = (radius_inner + radius_outer) / 2.0
+    for i in range(bolt_count):
+        ang = 2.0 * math.pi * i / bolt_count
+        bx = bolt_circle_r * math.cos(ang)
+        by = bolt_circle_r * math.sin(ang)
+        bolt = Part.makeCylinder(
+            bolt_dia / 2.0, flange_t + 2, FreeCAD.Vector(bx, by, z0 - 1), direction
+        )
+        flange = flange.cut(bolt)
+
+    return flange
+
+
+def _rect_flange(center_x, center_z, y, inner_w, inner_h, flange_t, flange_width, bolt_dia):
+    """
+    Flat rectangular plate flange for the inlet duct's far end.
+    inner_w/inner_h = the duct's OUTER cross-section (its bore matches
+    the duct's outer footprint exactly - same flush-fit logic as the
+    round flange). y = the duct end's y-coordinate (its open face);
+    the plate extends further out in -Y beyond it.
+    """
+    outer_w = inner_w + 2.0 * flange_width
+    outer_h = inner_h + 2.0 * flange_width
+    y0 = y - flange_t
+
+    plate = Part.makeBox(
+        outer_w, flange_t, outer_h,
+        FreeCAD.Vector(center_x - outer_w / 2.0, y0, center_z - outer_h / 2.0),
+    )
+    hole = Part.makeBox(
+        inner_w, flange_t + 2, inner_h,
+        FreeCAD.Vector(center_x - inner_w / 2.0, y0 - 1, center_z - inner_h / 2.0),
+    )
+    flange = plate.cut(hole)
+
+    margin = flange_width / 2.0
+    for sx in (-1, 1):
+        for sz in (-1, 1):
+            bx = center_x + sx * (outer_w / 2.0 - margin)
+            bz = center_z + sz * (outer_h / 2.0 - margin)
+            bolt = Part.makeCylinder(
+                bolt_dia / 2.0, flange_t + 2, FreeCAD.Vector(bx, y0 - 1, bz),
+                FreeCAD.Vector(0, 1, 0),
+            )
+            flange = flange.cut(bolt)
+
+    return flange
+
+
+# ---- Geometry builder -------------------------------------------------
 def _build_cyclone_shape(dims_mm: dict):
     """
-    Builds the cyclone as a hollow sheet-metal shell:
-      - Barrel: cylindrical shell
-      - Cone: tapered conical shell below barrel
-      - Exhaust (vortex finder): open-ended tube through the top, into barrel
-      - Inlet: tangential rectangular duct, open into the barrel
-      - Dust outlet: open bottom (cone tip, per BottomOutletMm)
-    Wall thickness = SheetThicknessMm (default 3mm). Everything else
-    is unchanged from the solid version - solid is built first, then
-    shelled out with Part.makeThickness, removing the top/bottom faces
-    so air can actually pass through (open ends), not sealed solid caps.
+    Builds the cyclone as a HOLLOW SHEET-METAL SHELL, matching the
+    reference sketch: barrel + cone + a physical air-out pipe that
+    protrudes above the roof + a tangential inlet duct, all fused into one
+    solid envelope, then shelled to WallThicknessMm - leaving exactly 3
+    openings: Air In (inlet duct end), Air Out (top of the vortex-finder
+    pipe), and Dust Outlet (bottom tip of the cone). A bolted flange is
+    then welded onto each of those 3 openings for real ducting connections.
     """
     barrel_d = dims_mm["BarrelDiameterMm"]
     barrel_h = dims_mm["BarrelHeightMm"]
@@ -60,95 +151,129 @@ def _build_cyclone_shape(dims_mm: dict):
     bottom_outlet = dims_mm["BottomOutletMm"]
     inlet_h = dims_mm["InletHeightMm"]
     inlet_w = dims_mm["InletWidthMm"]
-    thickness = dims_mm.get("SheetThicknessMm", 3.0)
 
-    t = dims_mm.get("WallThicknessMm", 3.0)
-    protrusion = dims_mm.get("ExhaustProtrusionMm", 100.0)  # pipe height above roof
+    # Sheet metal wall thickness - defaults to 3mm if not sent, so older
+    # JSON payloads (without this field) keep working unchanged.
+    wall_t = dims_mm.get("WallThicknessMm", 3.0)
+
+    # Flange dimensions - all optional, all default so old payloads work.
+    flange_t = dims_mm.get("FlangeThicknessMm", 10.0)       # plate thickness
+    flange_width = dims_mm.get("FlangeWidthMm", 25.0)       # radial/lateral margin beyond the pipe/duct OD
+    bolt_dia = dims_mm.get("FlangeBoltHoleDiaMm", 12.0)
+    bolt_count_round = int(dims_mm.get("FlangeBoltCountRound", 4))
 
     barrel_r = barrel_d / 2.0
-    bot_r = bottom_outlet / 2.0
 
-    # --- Barrel: hollow tube, open top & bottom (top gets a roof below,
-    # bottom joins the cone's open interior - no caps here) ---
-    barrel_outer = Part.makeCylinder(barrel_r, barrel_h)
-    barrel_inner = Part.makeCylinder(max(barrel_r - t, 1.0), barrel_h)
-    barrel_tube = barrel_outer.cut(barrel_inner)
+    barrel = Part.makeCylinder(barrel_r, barrel_h)
 
-    # --- Cone: hollow tapered tube, built by revolving a thin quad
-    # profile (not by subtracting two solid cones - that produced a
-    # self-intersecting, non-manifold mesh near the apex). Open top
-    # (joins barrel) & open bottom = Dust Outlet, matching the sketch. ---
-    inner_top_r = max(barrel_r - t, 1.0)
-    inner_bot_r = max(bot_r - t, 0.5)
-    profile_pts = [
-        FreeCAD.Vector(barrel_r, 0, 0),
-        FreeCAD.Vector(bot_r, 0, -cone_h),
-        FreeCAD.Vector(inner_bot_r, 0, -cone_h),
-        FreeCAD.Vector(inner_top_r, 0, 0),
-        FreeCAD.Vector(barrel_r, 0, 0),
-    ]
-    profile_wire = Part.makePolygon(profile_pts)
-    profile_face = Part.Face(profile_wire)
-    cone_tube = profile_face.revolve(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1), 360)
-
-    # --- Roof: solid disc closing the barrel top, pierced only by the
-    # exhaust pipe hole (this is the "closed except 3 openings" roof) ---
-    roof_disc = Part.makeCylinder(barrel_r, t, FreeCAD.Vector(0, 0, barrel_h))
-    roof_hole = Part.makeCylinder(
-        exhaust_d / 2.0, t + 2, FreeCAD.Vector(0, 0, barrel_h - 1)
+    # Wide face (barrel_r) at z=0, touching the barrel; narrow tip
+    # (bottom_outlet/2, the dust outlet) at z=-cone_h.
+    cone = Part.makeCone(
+        barrel_r,
+        bottom_outlet / 2.0,
+        cone_h,
+        FreeCAD.Vector(0, 0, 0),
+        FreeCAD.Vector(0, 0, -1),
     )
-    roof = roof_disc.cut(roof_hole)
 
-    # --- Exhaust pipe: real hollow tube, immersed exhaust_l into the
-    # barrel and physically protruding 'protrusion' mm above the roof.
-    # Open at both ends -> Air Out opening is the top rim of this pipe. ---
-    pipe_bottom_z = barrel_h - exhaust_l
-    pipe_top_z = barrel_h + t + protrusion
-    pipe_h = pipe_top_z - pipe_bottom_z
-    pipe_outer = Part.makeCylinder(
-        exhaust_d / 2.0, pipe_h, FreeCAD.Vector(0, 0, pipe_bottom_z), FreeCAD.Vector(0, 0, 1)
-    )
-    pipe_inner = Part.makeCylinder(
-        max(exhaust_d / 2.0 - t, 1.0), pipe_h + 2,
-        FreeCAD.Vector(0, 0, pipe_bottom_z - 1), FreeCAD.Vector(0, 0, 1),
-    )
-    pipe = pipe_outer.cut(pipe_inner)
+    body = barrel.fuse(cone)
 
-    # --- Inlet duct: hollow rectangular tube, tangential to the barrel.
-    # Open at the outer end (Air In) and open where it meets the barrel. ---
+    # Dust outlet pipe stub: short straight pipe below the cone tip.
+    dust_stub_length = dims_mm.get("DustOutletPipeLengthMm", 100.0)
+    dust_pipe_bottom_z = -cone_h - dust_stub_length
+    dust_pipe = Part.makeCylinder(
+        bottom_outlet / 2.0,
+        dust_stub_length,
+        FreeCAD.Vector(0, 0, dust_pipe_bottom_z),
+        FreeCAD.Vector(0, 0, 1),
+    )
+    body = body.fuse(dust_pipe)
+
+    # Air-out pipe (vortex finder): straight vertical pipe, protruding
+    # above the roof.
+    pipe_r = exhaust_d / 2.0
+    exhaust_bottom_z = barrel_h - exhaust_l
+    exhaust_top_z = barrel_h + 50
+    exhaust_pipe = Part.makeCylinder(
+        pipe_r,
+        exhaust_top_z - exhaust_bottom_z,
+        FreeCAD.Vector(0, 0, exhaust_bottom_z),
+        FreeCAD.Vector(0, 0, 1),
+    )
+    body = body.fuse(exhaust_pipe)
+
+    # Tangential inlet duct: offset so its outer wall touches the barrel
+    # circle at (barrel_r, 0) - gas enters along the wall, not aimed at
+    # the axis, which is what creates the vortex.
     duct_len = barrel_r * 1.5
+    duct_far_y = -duct_len
     duct_z0 = barrel_h - inlet_h - 20
-    duct_outer_box = Part.makeBox(
-        inlet_w, duct_len, inlet_h, FreeCAD.Vector(barrel_r - inlet_w, -duct_len, duct_z0)
+    duct_center_x = barrel_r - inlet_w / 2.0
+    duct_center_z = duct_z0 + inlet_h / 2.0
+
+    inlet_box = Part.makeBox(
+        inlet_w, duct_len, inlet_h,
+        FreeCAD.Vector(barrel_r - inlet_w, duct_far_y, duct_z0),
     )
-    bore_x0 = barrel_r - inlet_w + t
-    bore_x1 = barrel_r + 5.0  # past the outer barrel surface -> clean through-cut
-    bore_z0 = duct_z0 + t
-    bore_h = max(inlet_h - 2 * t, 1.0)
+    body = body.fuse(inlet_box)
 
-    # Bore for hollowing the DUCT ITSELF - extends 1mm past both Y ends
-    # so both end caps cut cleanly (open tube). Only touches duct_outer_box.
-    duct_bore_box = Part.makeBox(
-        bore_x1 - bore_x0, duct_len + 2, bore_h,
-        FreeCAD.Vector(bore_x0, -duct_len - 1, bore_z0),
+    # ---- Shell into hollow sheet metal ----
+    tol = 1.0  # mm matching tolerance for locating faces by position
+
+    def _is_dust_outlet_face(f):
+        com = f.CenterOfMass
+        return abs(com.z - dust_pipe_bottom_z) < tol and (
+            (com.x ** 2 + com.y ** 2) ** 0.5
+        ) < (bottom_outlet / 2.0 + tol)
+
+    def _is_air_out_face(f):
+        com = f.CenterOfMass
+        return abs(com.z - exhaust_top_z) < tol and (
+            com.x ** 2 + com.y ** 2
+        ) ** 0.5 < (pipe_r + tol)
+
+    def _is_air_in_face(f):
+        com = f.CenterOfMass
+        return abs(com.y - duct_far_y) < tol
+
+    open_faces = []
+    for f in body.Faces:
+        if _is_dust_outlet_face(f) or _is_air_out_face(f) or _is_air_in_face(f):
+            open_faces.append(f)
+
+    if open_faces:
+        shell = body.makeThickness(open_faces, -wall_t, 1e-3)
+    else:
+        print(
+            "WARNING: could not identify open faces for shelling - "
+            "returning a SOLID body instead of hollow sheet metal.",
+            file=sys.stderr,
+        )
+        shell = body
+
+    # ---- Weld a bolted flange onto each of the 3 openings ----
+    # Bores match each opening's OUTER dimension exactly (see the
+    # _round_flange/_rect_flange docstrings) so the flange sits flush
+    # around the opening without capping or narrowing it.
+    air_out_flange = _round_flange(
+        radius_inner=pipe_r, z=exhaust_top_z, extend_up=True,
+        flange_t=flange_t, flange_width=flange_width,
+        bolt_dia=bolt_dia, bolt_count=bolt_count_round,
     )
-    duct_tube = duct_outer_box.cut(duct_bore_box)
-
-    # Window into the BARREL WALL - clamped to duct_outer_box's exact Y
-    # footprint (no +1mm overshoot past Y=0). The overshoot was opening
-    # a thin extra slit in the barrel wall beside the real duct opening,
-    # on the side duct_outer_box doesn't cover - that was the bug.
-    barrel_window_box = Part.makeBox(
-        bore_x1 - bore_x0, duct_len, bore_h,
-        FreeCAD.Vector(bore_x0, -duct_len, bore_z0),
+    dust_outlet_flange = _round_flange(
+        radius_inner=bottom_outlet / 2.0, z=dust_pipe_bottom_z, extend_up=False,
+        flange_t=flange_t, flange_width=flange_width,
+        bolt_dia=bolt_dia, bolt_count=bolt_count_round,
     )
-    barrel_tube = barrel_tube.cut(barrel_window_box)
+    inlet_flange = _rect_flange(
+        center_x=duct_center_x, center_z=duct_center_z, y=duct_far_y,
+        inner_w=inlet_w, inner_h=inlet_h,
+        flange_t=flange_t, flange_width=flange_width, bolt_dia=bolt_dia,
+    )
 
-    # Exactly 3 openings on the finished body: Air In (duct far end),
-    # Air Out (pipe top), Dust Outlet (cone tip) - everything else closed.
-    body = barrel_tube.fuse(cone_tube).fuse(roof).fuse(pipe).fuse(duct_tube)
+    final_shape = shell.fuse(air_out_flange).fuse(dust_outlet_flange).fuse(inlet_flange)
 
-    return body
+    return final_shape
 
 
 # ---- TechDraw 2D export -------------------------------------------------
@@ -174,6 +299,9 @@ def _export_techdraw(doc, shape_obj, output_dir: str, base_name: str):
     pdf_path = os.path.join(output_dir, f"{base_name}.pdf")
     dxf_path = os.path.join(output_dir, f"{base_name}.dxf")
 
+    # freecadcmd.exe has no GUI, so TechDrawGui (needed for PDF export)
+    # is not available here. PDF stays None when run this way - expected,
+    # not an error. STEP + DXF are the primary deliverables.
     try:
         import TechDrawGui
         TechDrawGui.exportPageAsPdf(page, pdf_path)
@@ -191,15 +319,15 @@ def _export_techdraw(doc, shape_obj, output_dir: str, base_name: str):
     return pdf_path, dxf_path
 
 
-# ---- 3D mesh export (OBJ) ------------------------------------------------
+# ---- 3D mesh export (OBJ, browser-viewable, headless-compatible) --------
 def _export_obj_mesh(shape, output_dir: str, base_name: str):
     obj_path = os.path.join(output_dir, f"{base_name}.obj")
     try:
-        doc_mesh = Mesh.Mesh(shape.tessellate(0.5))
-        # tessellate() meshes each BREP face independently - adjacent
-        # faces don't share vertex indices at their common edge, so
-        # naive export looks "fragmented" even for a perfectly valid
-        # solid. Weld those seams before writing.
+        doc_mesh = Mesh.Mesh(shape.tessellate(0.5))  # 0.5mm max deviation
+        # Weld tessellation seams between adjacent BREP faces so the
+        # exported mesh isn't falsely reported as fragmented/non-watertight
+        # by downstream viewers - this is an export-quality fix, not a
+        # geometry fix.
         doc_mesh.removeDuplicatedPoints()
         doc_mesh.removeDuplicatedFacets()
         doc_mesh.write(obj_path)
@@ -222,9 +350,9 @@ def generate_cyclone_cad(dimensions_mm: dict, output_dir: str) -> dict:
 
     if not shape.isValid():
         print(
-            f"WARNING: generated solid failed shape.isValid() - "
-            f"this IS a real geometry defect (not an export artifact). "
-            f"Check dimension ratios (wall thickness vs bore sizes).",
+            "WARNING: generated solid failed shape.isValid() - this IS a "
+            "real geometry defect (not an export artifact). Check "
+            "dimension ratios (wall/flange thickness vs bore sizes).",
             file=sys.stderr,
         )
 
@@ -246,6 +374,7 @@ def generate_cyclone_cad(dimensions_mm: dict, output_dir: str) -> dict:
     }
 
 
+# ---- Entry point: reads input from environment variables ----------------
 if __name__ == "__main__":
     dims_json = os.environ.get("CAD_DIMS_JSON")
     out_dir = os.environ.get("CAD_OUTPUT_DIR")
@@ -253,6 +382,7 @@ if __name__ == "__main__":
     if dims_json and out_dir:
         dims = json.loads(dims_json)
     else:
+        # Standalone manual test with built-in sample dimensions.
         dims = {
             "BarrelDiameterMm": 300,
             "BarrelHeightMm": 450,
@@ -263,8 +393,15 @@ if __name__ == "__main__":
             "InletHeightMm": 150,
             "InletWidthMm": 60,
             "WallThicknessMm": 3,
+            "FlangeThicknessMm": 10,
+            "FlangeWidthMm": 25,
+            "FlangeBoltHoleDiaMm": 12,
+            "FlangeBoltCountRound": 4,
         }
         out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cad-exports", "test")
 
     result = generate_cyclone_cad(dims, out_dir)
+    # Prefixed marker line so app.py can reliably find the result even if
+    # FreeCAD prints extra diagnostic lines (Recompute..., transfer stats,
+    # etc.) to stdout before this.
     print("RESULT_JSON:" + json.dumps(result))
