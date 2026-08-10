@@ -679,25 +679,31 @@ def predict_field_status(job_id: str) -> PredictFieldStatusResponse:
             created_at_unix=job.get("created_at"),
             completed_at_unix=job.get("completed_at"),
         )
+# -----------------------------------------------------------------------
+# REPLACE the entire "CAD GENERATION" block at the bottom of app.py with
+# this version. Data is passed to cad_generator.py via ENVIRONMENT
+# VARIABLES, not command-line arguments - freecadcmd.exe's own argument
+# parser tries to interpret every extra CLI argument as a file to open,
+# which breaks plain string arguments no matter how they're separated.
+# Environment variables avoid that parser entirely.
+#
+# Add near the top of app.py, with the other imports (skip any already
+# present):
+#     import subprocess
+# -----------------------------------------------------------------------
 
+import subprocess
 
-        # ─────────────────────────────────────────────────────────────────────────
-# CAD GENERATION — synchronous (seconds, not minutes; no job/poll needed,
-# unlike /predict_field). Add this block to app.py, after the existing
-# /predict_field/* routes. Also add near the top of app.py:
-#     from cad_generator import generate_cyclone_cad
-# and add this static mount alongside the existing RENDERS_DIR mount:
-#     CAD_EXPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cad-exports")
-#     os.makedirs(CAD_EXPORTS_DIR, exist_ok=True)
-#     app.mount("/cad-exports", StaticFiles(directory=CAD_EXPORTS_DIR), name="cad-exports")
-# ─────────────────────────────────────────────────────────────────────────
+FREECAD_CMD_PATH = os.environ.get(
+    "FREECAD_CMD_PATH", r"C:\Program Files\FreeCAD 1.1\bin\freecadcmd.exe"
+)
+_SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
+_CAD_GENERATOR_SCRIPT = os.path.join(_SERVICE_DIR, "cad_generator.py")
+
 
 class GenerateCadRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    # PascalCase aliases to match CyclonePredictionRepository.cs's
-    # OutgoingJsonOptions (PropertyNamingPolicy = null), same convention
-    # as PredictFieldStartRequest above.
     RevisionId: int = Field(..., alias="RevisionId")
     BarrelDiameterMm: float = Field(..., alias="BarrelDiameterMm")
     BarrelHeightMm: float = Field(..., alias="BarrelHeightMm")
@@ -713,25 +719,29 @@ class GenerateCadResponse(BaseModel):
     StepUrl: Optional[str] = None
     DxfUrl: Optional[str] = None
     PdfUrl: Optional[str] = None
+    ObjUrl: Optional[str] = None
 
 
 @app.post("/generate_cad", response_model=GenerateCadResponse)
 def generate_cad(request: GenerateCadRequest):
     """
-    Synchronous CAD generation — builds cyclone geometry from dimensions
-    and exports STEP/DXF/PDF. Unlike /predict_field/start, no job store or
-    polling: FreeCAD geometry+export takes seconds, so the HTTP request
-    just waits for the result directly.
+    Synchronous CAD generation. Runs FreeCAD as a SEPARATE PROCESS
+    (freecadcmd.exe) via subprocess - not an in-process import, since
+    FreeCAD's compiled modules only load inside FreeCAD's own bundled
+    Python interpreter. Input is passed via environment variables (see
+    cad_generator.py's module docstring for why, not CLI args).
     """
-    print("DEBUG: /generate_cad called")
-    print(f"DEBUG: request data = {request.dict()}")
-    from cad_generator import generate_cyclone_cad
-    print("DEBUG: cad_generator imported")
+    if not os.path.isfile(FREECAD_CMD_PATH):
+        raise HTTPException(
+            500,
+            f"FreeCAD executable not found at '{FREECAD_CMD_PATH}'. "
+            f"Set the FREECAD_CMD_PATH environment variable to the correct "
+            f"path to freecadcmd.exe.",
+        )
 
     output_dir = os.path.join(CAD_EXPORTS_DIR, str(request.RevisionId))
 
     dims = {
-        "RevisionId": request.RevisionId,
         "BarrelDiameterMm": request.BarrelDiameterMm,
         "BarrelHeightMm": request.BarrelHeightMm,
         "ConeHeightMm": request.ConeHeightMm,
@@ -742,15 +752,50 @@ def generate_cad(request: GenerateCadRequest):
         "InletWidthMm": request.InletWidthMm,
     }
 
-    try:
-        result = generate_cyclone_cad(dims, output_dir)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"CAD generation failed: {e}")
+    env = os.environ.copy()
+    env["CAD_DIMS_JSON"] = json.dumps(dims)
+    env["CAD_OUTPUT_DIR"] = output_dir
 
-    # cad_generator.generate_cyclone_cad already returns fully-formatted
-    # URLs (StepUrl/DxfUrl/PdfUrl), so just pass them through.
+    try:
+        proc = subprocess.run(
+            [FREECAD_CMD_PATH, _CAD_GENERATOR_SCRIPT],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(500, "CAD generation timed out after 120s.")
+
+    if proc.returncode != 0:
+        raise HTTPException(
+            500,
+            f"CAD generation failed (exit code {proc.returncode}). "
+            f"stderr: {proc.stderr[-2000:]}",
+        )
+
+    result = None
+    for line in proc.stdout.splitlines():
+        if line.startswith("RESULT_JSON:"):
+            result = json.loads(line[len("RESULT_JSON:"):])
+            break
+
+    if result is None:
+        raise HTTPException(
+            500,
+            f"CAD generation produced no result. "
+            f"stdout: {proc.stdout[-2000:]} stderr: {proc.stderr[-2000:]}",
+        )
+
+    def _to_url(path):
+        if not path:
+            return None
+        rel = os.path.relpath(path, CAD_EXPORTS_DIR).replace(os.sep, "/")
+        return f"/cad-exports/{rel}"
+
     return GenerateCadResponse(
-        StepUrl=result.get("StepUrl"),
-        DxfUrl=result.get("DxfUrl"),
-        PdfUrl=result.get("PdfUrl"),
+        StepUrl=_to_url(result.get("step_path")),
+        DxfUrl=_to_url(result.get("dxf_path")),
+        PdfUrl=_to_url(result.get("pdf_path")),
+        ObjUrl=_to_url(result.get("obj_path")),
     )
