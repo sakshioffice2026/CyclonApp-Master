@@ -62,6 +62,7 @@ Run:
     uvicorn app:app --host 0.0.0.0 --port 8000
 """
 from __future__ import annotations
+from add_dxf_dimensions import add_engineering_dimensions
 import json
 import math
 import threading
@@ -803,6 +804,68 @@ def generate_cad(request: GenerateCadRequest):
             f"CAD generation produced no result.\n"
             f"STDOUT: {proc.stdout}\n"
             f"STDERR: {proc.stderr}",
+        )
+
+    # ---------------------------------------------------------------
+    # Add engineering DIMENSION entities after FreeCAD has finished.
+    # ezdxf runs in the normal API Python environment, not FreeCAD's
+    # bundled Python environment.
+    # ---------------------------------------------------------------
+    dxf_path = result.get("dxf_path")
+
+    if not dxf_path:
+        print(
+            "[CAD] ERROR: FreeCAD did not return a DXF path.",
+            flush=True,
+        )
+        raise HTTPException(
+            500,
+            "CAD geometry was generated, but no DXF path was returned.",
+        )
+
+    try:
+        print(
+            f"[CAD] Adding engineering dimensions to: {dxf_path}",
+            flush=True,
+        )
+
+        add_engineering_dimensions(
+            dxf_path,
+            dims,
+        )
+
+        # Verify that real DXF DIMENSION entities were written.
+        import ezdxf
+
+        verification_doc = ezdxf.readfile(dxf_path)
+        dimension_count = sum(
+            1
+            for entity in verification_doc.modelspace()
+            if entity.dxftype() == "DIMENSION"
+        )
+       
+
+        print(
+            f"[CAD] DXF dimension verification: "
+            f"{dimension_count} DIMENSION entities",
+            flush=True,
+        )
+
+        if dimension_count == 0:
+            raise RuntimeError(
+                "Dimensioning completed, but the DXF contains "
+                "zero DIMENSION entities."
+            )
+
+    except Exception as e:
+        print(
+            f"[CAD] ERROR: Engineering dimension generation failed: {e}",
+            flush=True,
+        )
+        raise HTTPException(
+            500,
+            "CAD geometry was generated, but engineering "
+            f"dimensions could not be added: {e}",
         )
 
     # Convert file paths to URLs

@@ -36,7 +36,10 @@ import sys
 import json
 import math
 
-
+# Adds real DXF DIMENSION entities (extension lines + arrows + mm text)
+# to the front-view DXF. Lives next to this file; import failure must not
+# stop CAD generation (STEP/DXF/OBJ still matter without dimensions), so
+# this is wrapped in try/except at the call site, not here.
 # ---- Locate FreeCAD's Python modules --------------------------------
 def _add_freecad_to_path():
     if os.name == "nt":
