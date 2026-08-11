@@ -1,210 +1,389 @@
-﻿"""
+"""
 combine_cyclone_sheet.py
--------------------------
-Merges the ALREADY-GENERATED per-part and per-view 2D DXFs into ONE
-single DXF "sheet", arranged in a grid, each part labelled with its
-name. This is purely additive - it does not change cad_generator.py,
-app.py, flatten_dxf_front_view.py, or add_dxf_dimensions.py, and it does
-not touch/replace any of their existing output files. It only READS DXFs
-that already exist on disk and WRITES one new combined file.
+------------------------
+Consolidate the ALREADY-GENERATED 2D DXFs into one engineering drawing.
 
-LAYER SEPARATION (mechanical drawing convention): every part gets its
-OWN uniquely-named layer - PART_<NAME> for body geometry, DIM_<NAME> for
-that part's dimension lines/text. Source files all reuse the same
-generic layer names ("CycloneBody", "DIM_TEXT"), so importing them
-as-is would silently merge every part onto one shared layer, making it
-impossible to isolate/hide an individual part in AutoCAD/FreeCAD. Every
-imported entity is re-layered by PART NAME here specifically to avoid
-that.
+This module is deliberately a COMPOSITION stage only.
 
-WHERE THE INPUT FILES COME FROM (see cad_generator.py):
-  result = generate_cyclone_cad(...)
-  result["views"]    = {"front": ..., "top": ..., "side": ...}
-  result["sections"] = {"barrel": ..., "cone": ..., "air_out_pipe": ...,
-                         "dust_outlet_pipe": ..., "inlet_duct": ...}
-These 8 files already exist after generation - app.py just never reads
-`views`/`sections` today. This module reads them and lays them out on
-one page.
+SOURCE DATA IS SACRED
+---------------------
+The input DXFs are read as already-generated drawing documents. Their
+geometry, dimensions, scale, layers, linetypes, text properties and other
+entity properties are not regenerated or re-authored here. The only
+coordinate operation applied to imported source entities is a translation
+so the complete source drawing can be positioned at an intentional sheet
+anchor. No source entity is scaled, rotated, mirrored, exploded, flattened,
+redrawn or re-dimensioned.
 
-WHY A SIMPLE TRANSLATE-INTO-A-GRID APPROACH:
-Each per-view/per-section DXF comes from TechDraw.writeDXFView, and (per
-app.py's own comments) each one uses its OWN page-relative coordinate
-frame - they are NOT guaranteed to share a common origin with each
-other. That's fine for this purpose: we only need each part's shape to
-be internally correct (it is), so for every file we compute its own
-bounding box and shift ONLY that file's entities so its bottom-left
-corner lands at the next open grid cell. No assumption about any shared
-origin between files is made or needed.
+The old implementation used a bounding-box cursor/grid algorithm. That is
+not an engineering drawing layout, so it has been removed. The new layout
+uses explicit drawing anchors for the three principal assembly views and
+for the five fabrication details. A source drawing's bounding box is used
+ONLY to determine its local visual centre/extent for alignment to its
+predefined anchor; it is never used to choose the next position or a grid
+cell.
 
-USAGE:
+The three assembly views are laid out as a related orthographic group:
+
+    TOP / PLAN
+        |
+        | projected alignment
+        v
+    FRONT ELEVATION -------- RIGHT-SIDE ELEVATION
+
+The five component DXFs are placed in a dedicated DETAIL area below the
+principal views. They remain independent source drawings; only sheet-level
+labels, border, projection symbol and title block are added.
+
+Usage:
     combine_all_into_one_sheet(
         {**result["views"], **result["sections"]},
         out_path="/path/to/cyclone_all_parts.dxf",
     )
 """
 from __future__ import annotations
+
 import os
 import re
+from dataclasses import dataclass
+from typing import Iterable
+
 import ezdxf
 from ezdxf.addons import importer as ezdxf_importer
 
-LABEL_LAYER = "PART_LABELS"
 
-_LAYER_COLORS = [1, 2, 3, 4, 5, 6, 7, 8, 30, 40, 90, 140]  # cycled per part, distinct on screen
+SHEET_LAYER = "SHEET"
+SHEET_TEXT_LAYER = "SHEET_TEXT"
+SHEET_BORDER_LAYER = "SHEET_BORDER"
+
+# A drawing-sheet coordinate space. These are intentionally fixed layout
+# coordinates, not calculated packing/grid cells. The size is generous
+# enough for the existing TechDraw DXF page-relative coordinates while
+# keeping the layout readable in CAD viewers.
+SHEET_WIDTH = 3600.0
+SHEET_HEIGHT = 2500.0
+BORDER_MARGIN = 60.0
+TITLE_BLOCK_W = 720.0
+TITLE_BLOCK_H = 210.0
+DETAIL_BAND_H = 600.0
+
+# Explicit anchors. These are sheet coordinates chosen for the drawing,
+# not destinations computed from the previous view's width/height.
+# The anchor is the intended visual centre of each imported source drawing.
+PRINCIPAL_ANCHORS = {
+    "top": (1120.0, 1780.0),
+    "front": (1120.0, 1110.0),
+    "side": (2650.0, 1110.0),
+}
+
+DETAIL_ANCHORS = {
+    "barrel": (420.0, 430.0),
+    "cone": (1060.0, 430.0),
+    "air_out_pipe": (1700.0, 430.0),
+    "dust_outlet_pipe": (2340.0, 430.0),
+    "inlet_duct": (2980.0, 430.0),
+}
+
+LABELS = {
+    "top": "TOP / PLAN VIEW",
+    "front": "FRONT ELEVATION",
+    "side": "RIGHT-SIDE ELEVATION",
+    "barrel": "DETAIL A - BARREL",
+    "cone": "DETAIL B - CONE",
+    "air_out_pipe": "DETAIL C - AIR-OUT PIPE / VORTEX FINDER",
+    "dust_outlet_pipe": "DETAIL D - DUST-OUTLET PIPE",
+    "inlet_duct": "DETAIL E - INLET DUCT",
+}
 
 
-def _safe_layer_token(name: str) -> str:
-    """DXF layer names can't contain <>/\\":;?*|=`  - sanitize the part
-    name (e.g. "air_out_pipe" -> "AIR_OUT_PIPE") into a clean token."""
-    token = re.sub(r"[^A-Za-z0-9_\-]", "_", name).strip("_").upper()
-    return token or "PART"
+@dataclass(frozen=True)
+class SourceBounds:
+    xmin: float
+    xmax: float
+    ymin: float
+    ymax: float
+
+    @property
+    def center(self) -> tuple[float, float]:
+        return ((self.xmin + self.xmax) / 2.0, (self.ymin + self.ymax) / 2.0)
 
 
-def _bbox_of_entities(entities):
-    xs, ys = [], []
-    for e in entities:
-        t = e.dxftype()
-        if t == "LINE":
-            xs += [e.dxf.start.x, e.dxf.end.x]
-            ys += [e.dxf.start.y, e.dxf.end.y]
-        elif t == "LWPOLYLINE":
-            for p in e.get_points():
-                xs.append(p[0]); ys.append(p[1])
-        elif t in ("CIRCLE",):
-            c, r = e.dxf.center, e.dxf.radius
-            xs += [c.x - r, c.x + r]; ys += [c.y - r, c.y + r]
-        elif t in ("ARC",):
-            c, r = e.dxf.center, e.dxf.radius
-            xs += [c.x - r, c.x + r]; ys += [c.y - r, c.y + r]
-        elif t == "TEXT":
-            ins = e.dxf.insert
-            xs.append(ins.x); ys.append(ins.y)
-        elif t == "SPLINE":
-            for cp in e.control_points:
-                xs.append(cp[0]); ys.append(cp[1])
-    if not xs:
+# ---------------------------------------------------------------------------
+# Source-DXF inspection
+# ---------------------------------------------------------------------------
+
+def _entity_points(entity) -> Iterable[tuple[float, float]]:
+    """Yield representative XY points without changing the source entity."""
+    t = entity.dxftype()
+    d = entity.dxf
+
+    if t == "LINE":
+        yield d.start.x, d.start.y
+        yield d.end.x, d.end.y
+    elif t == "LWPOLYLINE":
+        for p in entity.get_points():
+            yield p[0], p[1]
+    elif t == "POLYLINE":
+        for v in entity.vertices:
+            p = v.dxf.location
+            yield p.x, p.y
+    elif t in {"CIRCLE", "ARC"}:
+        c = d.center
+        r = d.radius
+        # Full radial bounds are intentionally used only for determining
+        # the source drawing's local centre. No geometry is altered.
+        yield c.x - r, c.y - r
+        yield c.x + r, c.y + r
+    elif t == "ELLIPSE":
+        c = d.center
+        # Conservative source extent for alignment only.
+        mx = abs(d.major_axis.x) + abs(d.major_axis.y) + abs(d.major_axis.z)
+        my = mx * max(abs(d.ratio), 1e-9)
+        yield c.x - mx, c.y - my
+        yield c.x + mx, c.y + my
+    elif t == "SPLINE":
+        for p in entity.control_points:
+            yield p[0], p[1]
+    elif t in {"TEXT", "MTEXT", "INSERT"}:
+        p = d.insert
+        yield p.x, p.y
+
+
+def _source_bounds(entities) -> SourceBounds | None:
+    points = []
+    for entity in entities:
+        points.extend(_entity_points(entity))
+    if not points:
         return None
-    return min(xs), max(xs), min(ys), max(ys)
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return SourceBounds(min(xs), max(xs), min(ys), max(ys))
 
 
-def _ensure_layer(doc, name: str, color: int):
+# ---------------------------------------------------------------------------
+# Sheet primitives
+# ---------------------------------------------------------------------------
+
+def _ensure_layer(doc, name: str, color: int = 7, linetype: str = "CONTINUOUS"):
     if name not in doc.layers:
-        doc.layers.add(name, color=color)
+        doc.layers.add(name, color=color, linetype=linetype)
 
 
-def combine_all_into_one_sheet(
-    view_paths: dict,
-    out_path: str,
-    gap_x: float = 120.0,
-    gap_y: float = 150.0,
-    max_row_width: float = 2500.0,
-    label_height: float = 30.0,
-) -> str:
-    """Reads every {name: dxf_path} in view_paths (skips missing/None
-    entries so it degrades gracefully if a given view failed upstream),
-    imports each one's geometry into a new combined document ONTO A
-    LAYER NAMED FOR THAT PART (PART_<NAME> for body geometry, DIM_<NAME>
-    for that part's own dimension lines/text - keeps every part
-    independently toggleable, per standard mechanical-drawing practice),
-    translates each part into its own grid cell so nothing overlaps, and
-    writes one labelled DXF sheet to out_path. Returns out_path.
+def _add_text(msp, text: str, position: tuple[float, float], height: float,
+              layer: str = SHEET_TEXT_LAYER, rotation: float = 0.0):
+    return msp.add_text(
+        text,
+        dxfattribs={
+            "layer": layer,
+            "height": height,
+            "rotation": rotation,
+            "insert": position,
+        },
+    )
+
+
+def _add_line(msp, p1, p2, layer=SHEET_BORDER_LAYER, color=None):
+    attribs = {"layer": layer}
+    if color is not None:
+        attribs["color"] = color
+    return msp.add_line(p1, p2, dxfattribs=attribs)
+
+
+def _add_rect(msp, xmin, ymin, xmax, ymax, layer=SHEET_BORDER_LAYER, color=None):
+    _add_line(msp, (xmin, ymin), (xmax, ymin), layer, color)
+    _add_line(msp, (xmax, ymin), (xmax, ymax), layer, color)
+    _add_line(msp, (xmax, ymax), (xmin, ymax), layer, color)
+    _add_line(msp, (xmin, ymax), (xmin, ymin), layer, color)
+
+
+def _add_center_marks(msp, center, size=35.0, layer=SHEET_BORDER_LAYER):
+    x, y = center
+    _add_line(msp, (x - size, y), (x + size, y), layer)
+    _add_line(msp, (x, y - size), (x, y + size), layer)
+
+
+def _draw_sheet_frame(doc, msp):
+    _ensure_layer(doc, SHEET_BORDER_LAYER, color=7)
+    _ensure_layer(doc, SHEET_TEXT_LAYER, color=7)
+    _ensure_layer(doc, SHEET_LAYER, color=7)
+
+    _add_rect(
+        msp,
+        BORDER_MARGIN,
+        BORDER_MARGIN,
+        SHEET_WIDTH - BORDER_MARGIN,
+        SHEET_HEIGHT - BORDER_MARGIN,
+    )
+    _add_rect(
+        msp,
+        BORDER_MARGIN + 20,
+        BORDER_MARGIN + 20,
+        SHEET_WIDTH - BORDER_MARGIN - 20,
+        SHEET_HEIGHT - BORDER_MARGIN - 20,
+    )
+
+    # Dedicated detail band separator.
+    detail_top = BORDER_MARGIN + DETAIL_BAND_H
+    _add_line(
+        msp,
+        (BORDER_MARGIN + 20, detail_top),
+        (SHEET_WIDTH - BORDER_MARGIN - 20, detail_top),
+    )
+    _add_text(msp, "FABRICATION / COMPONENT DETAILS", (110.0, detail_top + 30.0), 28.0)
+
+    # Title block in the lower-right corner.
+    x0 = SHEET_WIDTH - BORDER_MARGIN - TITLE_BLOCK_W
+    y0 = BORDER_MARGIN
+    x1 = SHEET_WIDTH - BORDER_MARGIN
+    y1 = BORDER_MARGIN + TITLE_BLOCK_H
+    _add_rect(msp, x0, y0, x1, y1)
+    _add_line(msp, (x0, y0 + 70), (x1, y0 + 70))
+    _add_line(msp, (x0 + 360, y0), (x0 + 360, y0 + 70))
+    _add_line(msp, (x0 + 510, y0), (x0 + 510, y0 + 70))
+    _add_line(msp, (x0, y0 + 140), (x1, y0 + 140))
+
+    _add_text(msp, "CYCLONE ASSEMBLY", (x0 + 20, y0 + 162), 34.0)
+    _add_text(msp, "2D MECHANICAL ENGINEERING DRAWING", (x0 + 20, y0 + 115), 22.0)
+    _add_text(msp, "UNITS: mm", (x0 + 20, y0 + 42), 20.0)
+    _add_text(msp, "SHEET: 1 / 1", (x0 + 380, y0 + 42), 20.0)
+    _add_text(msp, "REV: -", (x0 + 530, y0 + 42), 20.0)
+    _add_text(msp, "ORTHOGRAPHIC VIEWS: 1:1 SOURCE SCALE", (x0 + 20, y0 + 88), 18.0)
+
+    # Projection notation: simple third-angle symbol made from a cone-like
+    # profile and circle. It is sheet annotation only and does not touch
+    # imported source entities.
+    px, py = 250.0, SHEET_HEIGHT - 145.0
+    _add_text(msp, "THIRD-ANGLE PROJECTION", (px - 120.0, py + 80.0), 20.0)
+    _add_line(msp, (px - 45, py - 35), (px + 5, py + 15), SHEET_LAYER)
+    _add_line(msp, (px - 45, py + 35), (px + 5, py - 15), SHEET_LAYER)
+    msp.add_circle((px + 55, py), 38, dxfattribs={"layer": SHEET_LAYER})
+
+
+def _translate_entities(entities, dx: float, dy: float):
+    """Translate source entities only; no scale/rotation/property changes."""
+    for entity in entities:
+        try:
+            entity.translate(dx, dy, 0.0)
+        except Exception:
+            # ezdxf entities that do not implement translate are left in
+            # their source form rather than being exploded/redrawn.
+            # Normal TechDraw DXFs use LINE/LWPOLYLINE/TEXT and translate.
+            raise RuntimeError(
+                f"Entity type {entity.dxftype()} cannot be translated without "
+                "re-authoring it; refusing to modify source geometry."
+            )
+
+
+def _import_source(doc, path: str):
+    """Import a source DXF while retaining its original entity attributes."""
+    src = ezdxf.readfile(path)
+    out_msp = doc.modelspace()
+    before = {e.dxf.handle for e in out_msp}
+
+    importer = ezdxf_importer.Importer(src, doc)
+    importer.import_modelspace()
+    importer.finalize()
+
+    imported = [e for e in out_msp if e.dxf.handle not in before]
+    if not imported:
+        raise ValueError(f"Source DXF contains no modelspace entities: {path}")
+    return imported
+
+
+def _place_source(doc, name: str, path: str, anchor: tuple[float, float]):
+    if not path or not os.path.isfile(path):
+        return False
+
+    entities = _import_source(doc, path)
+    bounds = _source_bounds(entities)
+    if bounds is None:
+        raise ValueError(f"Unable to determine placement anchor for {name}: {path}")
+
+    cx, cy = bounds.center
+    dx = anchor[0] - cx
+    dy = anchor[1] - cy
+    _translate_entities(entities, dx, dy)
+    return True
+
+
+def _add_view_labels(msp):
+    for key, anchor in PRINCIPAL_ANCHORS.items():
+        _add_text(msp, LABELS[key], (anchor[0] - 250.0, anchor[1] + 420.0), 28.0)
+
+    for key, anchor in DETAIL_ANCHORS.items():
+        _add_text(msp, LABELS[key], (anchor[0] - 250.0, anchor[1] + 250.0), 22.0)
+
+
+def combine_all_into_one_sheet(view_paths: dict, out_path: str) -> str:
+    """Merge existing 2D DXFs into one intentionally laid-out sheet.
+
+    `view_paths` is expected to contain the existing assembly views and
+    component detail DXFs returned by generate_cyclone_cad(). Missing files
+    are skipped and reported; no source DXF is overwritten.
+
+    IMPORTANT: source entities are imported with their original properties
+    and are only translated to the explicit sheet anchors. No scale,
+    rotation, layer, linetype, dimension, geometry or entity-property edits
+    are performed on source entities.
     """
     out_doc = ezdxf.new("R2010")
-    out_msp = out_doc.modelspace()
-    _ensure_layer(out_doc, LABEL_LAYER, color=7)
+    _draw_sheet_frame(out_doc, out_doc.modelspace())
 
-    cursor_x, cursor_y = 0.0, 0.0
-    row_height = 0.0
-    placed = 0
+    placed = []
     skipped = []
+    failures = []
 
-    for idx, (name, path) in enumerate(view_paths.items()):
-        if not path or not os.path.exists(path):
-            skipped.append(name)
+    # Principal orthographic group. The anchors are fixed drawing datums,
+    # deliberately chosen to establish projection relationships.
+    for key in ("top", "front", "side"):
+        path = view_paths.get(key)
+        if not path or not os.path.isfile(path):
+            skipped.append(key)
             continue
+        try:
+            if _place_source(out_doc, key, path, PRINCIPAL_ANCHORS[key]):
+                placed.append(key)
+        except Exception as exc:
+            failures.append(f"{key}: {exc}")
 
-        token = _safe_layer_token(name)
-        body_layer = f"PART_{token}"
-        dim_layer = f"DIM_{token}"
-        part_color = _LAYER_COLORS[idx % len(_LAYER_COLORS)]
-        _ensure_layer(out_doc, body_layer, color=part_color)
-        _ensure_layer(out_doc, dim_layer, color=part_color)
-
-        src_doc = ezdxf.readfile(path)
-
-        # Import this file's entities (+ needed layers/linetypes/styles)
-        # into out_doc, tracking exactly which new entities arrived so we
-        # can bbox + move + re-layer only THIS part, not the whole sheet
-        # so far.
-        handles_before = {e.dxf.handle for e in out_msp}
-        imp = ezdxf_importer.Importer(src_doc, out_doc)
-        imp.import_modelspace()
-        imp.finalize()
-        new_entities = [e for e in out_msp if e.dxf.handle not in handles_before]
-
-        if not new_entities:
-            skipped.append(name)
+    # Fabrication details are a separate presentation zone. Their positions
+    # are explicit anchors, not automatically packed based on source size.
+    for key in ("barrel", "cone", "air_out_pipe", "dust_outlet_pipe", "inlet_duct"):
+        path = view_paths.get(key)
+        if not path or not os.path.isfile(path):
+            skipped.append(key)
             continue
+        try:
+            if _place_source(out_doc, key, path, DETAIL_ANCHORS[key]):
+                placed.append(key)
+        except Exception as exc:
+            failures.append(f"{key}: {exc}")
 
-        # Re-layer by part: anything that came in on a dimension-style
-        # source layer (DIM_TEXT, or already named DIM_*) goes onto this
-        # part's DIM_<NAME> layer; everything else (body outline) goes
-        # onto PART_<NAME>. This is what actually separates the parts -
-        # without it every part's geometry would sit on the source
-        # files' shared "CycloneBody"/"DIM_TEXT" layer names and merge
-        # together indistinguishably once imported into one document.
-        for e in new_entities:
-            src_layer = e.dxf.layer
-            e.dxf.layer = dim_layer if src_layer.upper().startswith("DIM") else body_layer
+    msp = out_doc.modelspace()
+    _add_view_labels(msp)
 
-        box = _bbox_of_entities(new_entities)
-        if box is None:
-            skipped.append(name)
-            continue
-        xmin, xmax, ymin, ymax = box
-        width = xmax - xmin
-        height = ymax - ymin
-
-        # Wrap to a new row once the current row gets too wide.
-        if cursor_x + width > max_row_width and cursor_x > 0:
-            cursor_x = 0.0
-            cursor_y += row_height + gap_y
-            row_height = 0.0
-
-        dx = cursor_x - xmin
-        dy = cursor_y - ymin
-        for e in new_entities:
-            e.translate(dx, dy, 0)
-
-        # Label above the part - own layer too, so labels can be hidden
-        # as a group independently of any part's geometry.
-        out_msp.add_text(
-            name,
-            dxfattribs={
-                "layer": LABEL_LAYER,
-                "height": label_height,
-                "insert": (cursor_x, cursor_y + height + 20),
-            },
-        )
-
-        cursor_x += width + gap_x
-        row_height = max(row_height, height)
-        placed += 1
+    # Centre marks are sheet-level registration aids. They do not alter the
+    # source DXF geometry.
+    for anchor in PRINCIPAL_ANCHORS.values():
+        _add_center_marks(msp, anchor, size=25.0)
 
     out_doc.saveas(out_path)
+
+    if failures:
+        raise RuntimeError("DXF consolidation failed: " + "; ".join(failures))
+
     print(
-        f"[combine_cyclone_sheet] {placed} parts placed, each on its own "
-        f"PART_*/DIM_* layer -> {out_path}"
-        + (f" (skipped, no file: {skipped})" if skipped else "")
+        f"[combine_cyclone_sheet] consolidated {len(placed)} source DXFs -> {out_path}"
+        + (f"; skipped={skipped}" if skipped else "")
     )
     return out_path
 
 
 if __name__ == "__main__":
     demo_paths = {
-        "cyclone_front": "cyclone_2d.dxf",
-        "cyclone_top": "cyclone_top.dxf",
-        "cyclone_side": "cyclone_side.dxf",
+        "front": "cyclone_front.dxf",
+        "top": "cyclone_top.dxf",
+        "side": "cyclone_side.dxf",
         "barrel": "barrel.dxf",
         "cone": "cone.dxf",
         "air_out_pipe": "air_out_pipe.dxf",
