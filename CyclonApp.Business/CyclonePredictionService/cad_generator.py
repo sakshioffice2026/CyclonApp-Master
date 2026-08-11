@@ -28,6 +28,20 @@ Usage from app.py (via subprocess):
 
 Standalone test (no env vars set -> uses built-in sample dimensions):
     freecadcmd.exe cad_generator.py
+
+FIX (this revision - dimensions invisible in DXF):
+_export_techdraw() and _export_view_dxf() set view.Direction but never
+set view.Scale / view.X / view.Y. On doc.recompute() FreeCAD auto-picks
+a page scale and placement, so the exported DXF geometry lands in
+auto-scaled/auto-offset page space - not raw model mm at origin (0,0).
+add_dxf_dimensions_2D.py's add_engineering_dimensions_2d() inserts TEXT
+at raw model coordinates (e.g. (0, -cone_h - 100)), assuming a 1:1,
+origin-anchored frame. Result: text and geometry end up in different
+coordinate frames, so the dimension text is not visibly co-located with
+the drawing. Fix: pin view.Scale = 1.0, view.X = 0, view.Y = 0 on both
+view objects so the DXF's coordinate frame matches what the dimension
+code assumes. No geometry, export logic, or section/view structure was
+changed.
 """
 
 from __future__ import annotations
@@ -314,8 +328,16 @@ def _build_cyclone_shape(dims_mm: dict):
 
 # ---- TechDraw 2D export (ORIGINAL - unchanged) ---------------------------
 def _export_techdraw(doc, shape_obj, output_dir: str, base_name: str):
-    """Original single front-view export. Untouched - still produces the
-    combined cyclone.pdf / cyclone.dxf exactly as before."""
+    """Original single front-view export. Still produces the combined
+    cyclone.pdf / cyclone.dxf as before.
+
+    FIX: view.Scale/X/Y are now pinned to 1.0/0/0 so the exported DXF's
+    coordinate frame is raw model mm at origin (0,0) - matching what
+    add_dxf_dimensions_2D.py assumes when it inserts dimension TEXT at
+    coordinates like (0, -cone_h - 100). Previously these were left at
+    FreeCAD's auto-computed values, which put the geometry at a different
+    scale/offset than the dimension text, making the text land off the
+    visible drawing area."""
     page = doc.addObject("TechDraw::DrawPage", "Page")
     template = doc.addObject("TechDraw::DrawSVGTemplate", "Template")
 
@@ -330,6 +352,9 @@ def _export_techdraw(doc, shape_obj, output_dir: str, base_name: str):
     view = doc.addObject("TechDraw::DrawViewPart", "FrontView")
     view.Source = [shape_obj]
     view.Direction = FreeCAD.Vector(0, -1, 0)
+    view.Scale = 1.0   # FIX: was auto-computed by recompute()
+    view.X = 0          # FIX: was auto-computed by recompute()
+    view.Y = 0           # FIX: was auto-computed by recompute()
     page.addView(view)
 
     doc.recompute()
@@ -367,7 +392,11 @@ def _export_view_dxf(doc, shape, direction_vec, output_dir: str, filename: str):
     importDXF.export used elsewhere in this file if that's unavailable on
     this FreeCAD build - same defensive try/except pattern as the rest of
     this module, so this never hard-crashes CAD generation.
-    """
+
+    FIX: view.Scale/X/Y pinned to 1.0/0/0 for the same reason as
+    _export_techdraw above - keeps this DXF's coordinate frame at raw
+    model mm / origin so dimension text inserted afterward lines up with
+    the geometry."""
     dxf_path = os.path.join(output_dir, filename)
     tmp_obj = doc.addObject("Part::Feature", f"Tmp_{filename.replace('.', '_')}")
     tmp_obj.Shape = shape
@@ -384,6 +413,9 @@ def _export_view_dxf(doc, shape, direction_vec, output_dir: str, filename: str):
     view = doc.addObject("TechDraw::DrawViewPart", f"View_{filename.replace('.', '_')}")
     view.Source = [tmp_obj]
     view.Direction = direction_vec
+    view.Scale = 1.0   # FIX: was auto-computed by recompute()
+    view.X = 0          # FIX: was auto-computed by recompute()
+    view.Y = 0           # FIX: was auto-computed by recompute()
     page.addView(view)
     doc.recompute()
 
@@ -479,7 +511,8 @@ def generate_cyclone_cad(dimensions_mm: dict, output_dir: str) -> dict:
 
     obj_path = _export_obj_mesh(shape, output_dir, base_name)
 
-    # ORIGINAL combined single-view export - unchanged.
+    # ORIGINAL combined single-view export - unchanged (aside from the
+    # view.Scale/X/Y fix inside _export_techdraw above).
     pdf_path, dxf_path = _export_techdraw(doc, shape_obj, output_dir, base_name)
 
     # NEW: multi-view (Front/Top/Side) of the whole assembly.

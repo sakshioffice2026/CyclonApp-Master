@@ -62,7 +62,6 @@ Run:
     uvicorn app:app --host 0.0.0.0 --port 8000
 """
 from __future__ import annotations
-from add_dxf_dimensions import add_engineering_dimensions
 import json
 import math
 import threading
@@ -74,6 +73,10 @@ from typing import Optional
 import os
 
 import torch
+import ezdxf
+from add_dxf_dimensions import add_engineering_dimensions_2d as add_engineering_dimensions
+from flatten_dxf_front_view import flatten_to_front_view_2d
+from combine_cyclone_sheet import combine_all_into_one_sheet
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
@@ -135,11 +138,12 @@ FIELD_JOB_SWEEP_INTERVAL_SECONDS = 300
 # side, so both inference paths pick the model the same way.
 # ─────────────────────────────────────────────────────────────────────────
 _DEFAULT_CHECKPOINT_PATHS_BY_TYPE = {
-"LAPPLE": "cyclone_model_lapple_parametric.pth",
-      "STAIRMAND": "cyclone_model_stairmand.pth",
+    "LAPPLE": "cyclone_model_lapple_parametric.pth",
+    "STAIRMAND": "cyclone_model_stairmand.pth",
     "STAIRMAND_GP": "cyclone_model_stairmand_gp.pth",
     "SWIFT_HE": "cyclone_model_swift_he.pth",
 }
+
 
 def _load_checkpoint_paths_by_type() -> dict[str, str]:
     """FIELD_MODEL_CHECKPOINT_PATHS_BY_TYPE, if set, must be a JSON object
@@ -680,7 +684,9 @@ def predict_field_status(job_id: str) -> PredictFieldStatusResponse:
             created_at_unix=job.get("created_at"),
             completed_at_unix=job.get("completed_at"),
         )
-# ---- CAD GENERATION SECTION (replace lines 695-801 in app.py) ----
+
+
+# ---- CAD GENERATION SECTION ----
 
 import subprocess
 
@@ -710,6 +716,7 @@ class GenerateCadResponse(BaseModel):
     DxfUrl: Optional[str] = None
     PdfUrl: Optional[str] = None
     ObjUrl: Optional[str] = None
+    AllPartsDxfUrl: Optional[str] = None
 
 
 @app.post("/generate_cad", response_model=GenerateCadResponse)
@@ -720,7 +727,7 @@ def generate_cad(request: GenerateCadRequest):
     FreeCAD's bundled Python. Input passed via environment variables (not CLI args).
     """
     print(f"[CAD] Starting CAD generation request for RevisionId={request.RevisionId}", flush=True)
-    
+
     if not os.path.isfile(FREECAD_CMD_PATH):
         print(f"[CAD] ERROR: FreeCAD not found at {FREECAD_CMD_PATH}", flush=True)
         raise HTTPException(
@@ -811,6 +818,17 @@ def generate_cad(request: GenerateCadRequest):
     # ezdxf runs in the normal API Python environment, not FreeCAD's
     # bundled Python environment.
     # ---------------------------------------------------------------
+    # REVERTED: result["views"]["front"] (TechDraw.writeDXFView's
+    # flattened projection) uses its OWN page-relative coordinate frame,
+    # which does not line up point-for-point with the raw model mm
+    # coordinates that add_dxf_dimensions.py's dimension geometry is
+    # built in — so dimensions added onto that file land in the wrong
+    # place (or off-page) relative to the drawing, which is why they
+    # disappeared. result["dxf_path"] (cyclone.dxf) preserves exact raw
+    # model X/Y/Z, and when viewed from the Front direction in FreeCAD
+    # (looking along -Y) its on-screen X/Z position matches our
+    # dimension code's assumptions exactly (X horizontal, Z -> DXF Y) —
+    # that's the file that actually worked. Back to using it.
     dxf_path = result.get("dxf_path")
 
     if not dxf_path:
@@ -823,6 +841,31 @@ def generate_cad(request: GenerateCadRequest):
             "CAD geometry was generated, but no DXF path was returned.",
         )
 
+    # Flatten the raw 3D wireframe into a genuine flat 2D front-view file
+    # BEFORE dimensioning. result["dxf_path"] preserves full 3D X/Y/Z
+    # (confirmed by inspection), so it is not actually 2D even though it
+    # looks right from FreeCAD's Front camera direction. Writes a NEW
+    # file (cyclone_2d.dxf) next to it — the original 3D wireframe is
+    # left untouched for any other consumer. Dimensioning is applied
+    # AFTER this, on the flattened file, using the exact same X/Z mapping
+    # that already worked (see add_dxf_dimensions.py's coordinate
+    # assumptions) — so alignment does not change, only the base geometry
+    # becomes truly flat.
+    try:
+        flat_dxf_path = os.path.join(os.path.dirname(dxf_path), "cyclone_2d.dxf")
+        print(f"[CAD] Flattening 3D wireframe to true 2D: {dxf_path} -> {flat_dxf_path}", flush=True)
+        flatten_to_front_view_2d(dxf_path, out_path=flat_dxf_path, dims_mm=dims)
+        dxf_path = flat_dxf_path
+    except Exception as e:
+        print(
+            f"[CAD] ERROR: flattening to 2D failed: {e}. Falling back to "
+            f"dimensioning the raw 3D wireframe file instead.",
+            flush=True,
+        )
+        # dxf_path stays as the raw wireframe — dimensioning still works
+        # (that's the file that was previously verified working), just
+        # the deliverable won't be a true flat 2D file in this fallback.
+
     try:
         print(
             f"[CAD] Adding engineering dimensions to: {dxf_path}",
@@ -834,27 +877,29 @@ def generate_cad(request: GenerateCadRequest):
             dims,
         )
 
-        # Verify that real DXF DIMENSION entities were written.
-        import ezdxf
-
+        # Verify that dimension geometry was written. add_dxf_dimensions.py
+        # now draws plain LINE (extension lines/dim lines/arrows) + TEXT
+        # (labels) entities directly in modelspace — no DIMENSION entity,
+        # no anonymous block, so a straight modelspace scan finds them
+        # reliably (unlike the old MTEXT-in-a-block approach).
         verification_doc = ezdxf.readfile(dxf_path)
-        dimension_count = sum(
-            1
-            for entity in verification_doc.modelspace()
-            if entity.dxftype() == "DIMENSION"
+        line_count = sum(
+            1 for entity in verification_doc.modelspace() if entity.dxftype() == "LINE"
         )
-       
+        text_count = sum(
+            1 for entity in verification_doc.modelspace() if entity.dxftype() == "TEXT"
+        )
 
         print(
             f"[CAD] DXF dimension verification: "
-            f"{dimension_count} DIMENSION entities",
+            f"{line_count} LINE entities, {text_count} TEXT labels",
             flush=True,
         )
 
-        if dimension_count == 0:
+        if line_count == 0:
             raise RuntimeError(
                 "Dimensioning completed, but the DXF contains "
-                "zero DIMENSION entities."
+                "zero dimension LINE entities."
             )
 
     except Exception as e:
@@ -868,6 +913,23 @@ def generate_cad(request: GenerateCadRequest):
             f"dimensions could not be added: {e}",
         )
 
+    # Combine the already-generated per-part + per-view DXFs
+    # (result["views"], result["sections"]) into one single reference
+    # sheet. Purely additive - does not touch dxf_path / the main
+    # dimensioned DXF at all, and a failure here must not fail CAD
+    # generation as a whole (same defensive posture as the rest of this
+    # endpoint).
+    all_parts_dxf_path = None
+    try:
+        all_parts_dxf_path = os.path.join(os.path.dirname(dxf_path), "cyclone_all_parts.dxf")
+        combine_all_into_one_sheet(
+            {**result.get("views", {}), **result.get("sections", {})},
+            all_parts_dxf_path,
+        )
+    except Exception as e:
+        print(f"[CAD] WARNING: combined all-parts sheet failed: {e}", flush=True)
+        all_parts_dxf_path = None
+
     # Convert file paths to URLs
     def _to_url(path):
         if not path:
@@ -877,9 +939,10 @@ def generate_cad(request: GenerateCadRequest):
 
     response = GenerateCadResponse(
         StepUrl=_to_url(result.get("step_path")),
-        DxfUrl=_to_url(result.get("dxf_path")),
+        DxfUrl=_to_url(dxf_path),
         PdfUrl=_to_url(result.get("pdf_path")),
         ObjUrl=_to_url(result.get("obj_path")),
+        AllPartsDxfUrl=_to_url(all_parts_dxf_path),
     )
     print(f"[CAD] Success! Response: {response}", flush=True)
     return response
