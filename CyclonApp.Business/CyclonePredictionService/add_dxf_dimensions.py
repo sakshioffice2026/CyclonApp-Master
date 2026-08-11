@@ -1,35 +1,35 @@
 ﻿"""
 add_dxf_dimensions.py
 ----------------------
-Adds engineering dimension MARKS (extension lines + dimension line +
-arrowheads + mm text) to the cyclone front-view DXF.
+Adds engineering dimension MARKS to the cyclone front-view DXF, written
+TWICE, on two separate layers, so the drawing is correct in both FreeCAD
+and AutoCAD:
 
-ROOT-CAUSE FIX (this revision): ezdxf's add_linear_dim(...).render()
-builds real DXF DIMENSION entities, but the actual drawable geometry
-(lines/arrows/MTEXT) it creates is written into an ANONYMOUS BLOCK, and
-only a DIMENSION entity referencing that block sits in modelspace.
-Whether FreeCAD's DXF importer resolves and draws that block content is
-inconsistent across FreeCAD/importer versions - in practice it very
-often does NOT, so the dimensions silently never appear, even though the
-DXF file itself is 100% valid and correct.
+  DIM_TEXT   - plain LINE + TEXT entities (extension lines, dimension
+               line, arrowheads, mm label). Guaranteed visible in every
+               DXF importer, including FreeCAD, with zero configuration.
+  DIM_NATIVE - real ezdxf DIMENSION entities (added via add_linear_dim
+               (...).render()). These are true, associative, editable
+               CAD dimension objects - the value is derived from the
+               measured geometry, and AutoCAD (and most other real CAD
+               tools) can select/edit them as native dimensions.
 
-GUARANTEED FIX: stop relying on the DIMENSION entity type entirely.
-Draw the extension lines, dimension line, and arrowheads as plain LINE
-entities, and the measurement label as a plain TEXT entity (not MTEXT,
-never inside a block). LINE and TEXT are the most basic DXF entity
-types - every DXF importer, including FreeCAD's, draws LINE entities
-unconditionally with zero configuration. This removes any dependency on
-DIMENSION-block resolution or DXF-text-import preferences.
+WHY BOTH: ezdxf's DIMENSION entities are correct DXF - but the actual
+drawable geometry they produce (lines/arrows/MTEXT) is written into an
+ANONYMOUS BLOCK, with only a DIMENSION entity in modelspace referencing
+that block. Whether FreeCAD's DXF importer resolves and draws that block
+content is inconsistent across FreeCAD/importer versions - in practice it
+often does NOT, so native-only dimensions can silently never appear in
+FreeCAD, even though the file itself is valid. AutoCAD does not have this
+problem and is where "real", editable DIMENSION objects matter most.
 
-NOTE on TEXT visibility specifically: FreeCAD's DXF importer has an
-"Import DXF text as Draft Text objects" preference (Edit -> Preferences
--> Import-Export -> DXF). If it's off, plain TEXT entities may still
-import but not always render exactly as expected depending on FreeCAD
-version. The LINE geometry (extension lines / dimension lines /
-arrowheads) does NOT depend on this setting at all and will always be
-visible - so even in the worst case, the dimension marks themselves are
-guaranteed visible; only the numeric label's exact rendering could vary
-by FreeCAD version/preference.
+Writing both means: FreeCAD users always see the DIM_TEXT geometry (plain
+LINE/TEXT, no block-resolution dependency); AutoCAD users get true
+DIMENSION objects on DIM_NATIVE they can select/edit/associate, in
+addition to the always-visible DIM_TEXT geometry. Either layer can be
+frozen/turned off in whichever tool if the visual doubling is unwanted -
+this module does not freeze either by default, since "guaranteed visible
+everywhere" is the priority.
 
 Coordinate system: Front view looking along -Y axis
   X-axis: horizontal (radial, mm)
@@ -40,6 +40,7 @@ import ezdxf
 from ezdxf.enums import TextEntityAlignment
 
 DIM_LAYER = "DIM_TEXT"
+NATIVE_DIM_LAYER = "DIM_NATIVE"
 
 
 def _arrow(msp, tip, direction, size, attribs):
@@ -53,6 +54,50 @@ def _arrow(msp, tip, direction, size, attribs):
     right = (back[0] - px * size * 0.4, back[1] - py * size * 0.4)
     msp.add_line(tip, left, dxfattribs=attribs)
     msp.add_line(tip, right, dxfattribs=attribs)
+
+
+def _add_native_dimension(
+    msp,
+    p1,
+    p2,
+    base,
+    angle,
+    text_height,
+    arrow_size,
+    ext_gap,
+    ext_overshoot,
+):
+    """Best-effort addition of a REAL ezdxf DIMENSION entity (associative,
+    editable in AutoCAD) alongside the guaranteed-visible LINE+TEXT this
+    module already draws. Value is derived from p1/p2 geometry by ezdxf
+    itself - not passed in - matching the "recommended" native behavior.
+
+    Wrapped in try/except: this is a purely additive enhancement, and a
+    failure here must never block or corrupt the guaranteed-visible
+    DIM_TEXT geometry drawn by _linear_dim.
+    """
+    try:
+        override = {
+            "dimtxt": text_height,
+            "dimasz": arrow_size,
+            "dimexo": ext_gap,
+            "dimexe": ext_overshoot,
+            "dimclrd": 3,
+            "dimclre": 3,
+            "dimclrt": 3,
+        }
+        dim = msp.add_linear_dim(
+            base=base,
+            p1=p1,
+            p2=p2,
+            angle=angle,
+            dimstyle="Standard",
+            override=override,
+            dxfattribs={"layer": NATIVE_DIM_LAYER},
+        )
+        dim.render()
+    except Exception:
+        pass
 
 
 def _linear_dim(
@@ -69,7 +114,10 @@ def _linear_dim(
     arrow_size=10,
     text_offset=15,
 ):
-    """Draws one linear dimension mark using only LINE + TEXT entities.
+    """Draws one linear dimension mark using only LINE + TEXT entities,
+    PLUS a native ezdxf DIMENSION entity on NATIVE_DIM_LAYER (see
+    _add_native_dimension). The LINE+TEXT geometry below is unchanged
+    from before and remains the guaranteed-visible copy.
 
     p1, p2 = the two measured points (model coordinates, mm)
     base   = a point that fixes WHERE the dimension line sits
@@ -79,6 +127,10 @@ def _linear_dim(
     text   = explicit label; if None, computed as the measured distance
     """
     attribs = attribs or {}
+
+    _add_native_dimension(
+        msp, p1, p2, base, angle, text_height, arrow_size, ext_gap, ext_overshoot
+    )
 
     if angle == 90:
         dim_x = base[0]
@@ -147,9 +199,9 @@ def _linear_dim(
 
 
 def add_engineering_dimensions_2d(dxf_path: str, dims_mm: dict, out_path: str | None = None) -> str:
-    """Add 2D dimension marks to the DXF front view using plain LINE +
-    TEXT entities only - guaranteed visible on import, no DIMENSION
-    entity / anonymous block / dimstyle dependency."""
+    """Add 2D dimension marks to the DXF front view: guaranteed-visible
+    LINE+TEXT on DIM_TEXT, plus real DIMENSION entities on DIM_NATIVE for
+    AutoCAD-style associative editing. See module docstring."""
 
     barrel_d = dims_mm["BarrelDiameterMm"]
     barrel_h = dims_mm["BarrelHeightMm"]
@@ -166,6 +218,8 @@ def add_engineering_dimensions_2d(dxf_path: str, dims_mm: dict, out_path: str | 
 
     if DIM_LAYER not in doc.layers:
         doc.layers.new(name=DIM_LAYER, dxfattribs={"color": 3})  # green
+    if NATIVE_DIM_LAYER not in doc.layers:
+        doc.layers.new(name=NATIVE_DIM_LAYER, dxfattribs={"color": 3})  # green
 
     attribs = {"layer": DIM_LAYER, "color": 3}
 
