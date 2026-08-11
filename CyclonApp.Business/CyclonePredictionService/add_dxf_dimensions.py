@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import ezdxf
 
-from drawing_sheet_composer import compose_engineering_sheet
+from drawing_sheet_layout import compose_engineering_sheet
 
 
 def _add_engineering_dimensions_to_file(dxf_path: str, dims_mm: dict) -> str:
@@ -120,8 +120,6 @@ def add_engineering_dimensions(dxf_path: str, dims_mm: dict, out_path: str | Non
 
     missing = [p for p in list(view_paths.values()) + list(section_paths.values()) if not os.path.isfile(p)]
     if missing:
-        # Restore the legacy path if composition cannot run.  This keeps CAD
-        # generation backward-compatible on installations missing a section.
         os.replace(raw_assembly_path, dxf_path)
         raise FileNotFoundError(
             "Single-sheet composition requires all generated view/detail DXFs; "
