@@ -1,0 +1,179 @@
+﻿@model CyclonApp.Model.ViewModel.CadViewModel
+@{
+    ViewData["Title"] = "3D / CAD Generation";
+    Layout = "_Layout";
+    var projects = ViewBag.Projects as IEnumerable<dynamic> ?? new List<dynamic>();
+}
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title">
+            <i class="bi bi-box me-2 text-primary"></i>3D / CAD Generation
+        </h1>
+        <p class="page-subtitle">Pick a project, design and revision, choose the files you need, then generate.</p>
+    </div>
+    <a href="@Url.Action("History")" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-clock-history me-1"></i>CAD History
+    </a>
+</div>
+
+@if (!string.IsNullOrEmpty(Model.ErrorMessage))
+{
+    <div class="alert alert-danger"><i class="bi bi-exclamation-triangle me-2"></i>@Model.ErrorMessage</div>
+}
+
+<div class="card">
+    <div class="card-header">
+        <h5 class="card-title"><i class="bi bi-ui-checks-grid me-2 text-primary"></i>Select Revision &amp; Files</h5>
+    </div>
+    <div class="card-body">
+        <form asp-controller="Cad" asp-action="Generate" method="post" id="cadForm">
+            @Html.AntiForgeryToken()
+
+            <div class="row g-3 mb-4">
+                <div class="col-md-4">
+                    <label class="form-label">Project</label>
+                    <select class="form-select" id="projectSelect">
+                        <option value="">Select project&hellip;</option>
+                        @foreach (var p in projects)
+                        {
+                            <option value="@p.Id">@(p.ProjectNumber != null ? p.ProjectNumber + " — " : "")@p.Name</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">Design</label>
+                    <select class="form-select" id="designSelect" disabled>
+                        <option value="">Select project first&hellip;</option>
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">Revision</label>
+                    <select class="form-select" id="revisionSelect" name="revisionId" disabled>
+                        <option value="">Select design first&hellip;</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="noResultsHint" class="alert alert-warning d-none">
+                <i class="bi bi-exclamation-circle me-2"></i>
+                This revision has no calculated results yet — run the design calculation first.
+            </div>
+
+            <label class="form-label d-block">Files to generate</label>
+            <div class="row g-2 mb-4">
+                <div class="col-md-4 col-6">
+                    <div class="form-check border rounded p-2">
+                        <input class="form-check-input" type="checkbox" name="fileTypes" value="step" id="fStep" checked>
+                        <label class="form-check-label" for="fStep">
+                            <i class="bi bi-box-seam me-1"></i>STEP (solid, .step)
+                        </label>
+                    </div>
+                </div>
+                <div class="col-md-4 col-6">
+                    <div class="form-check border rounded p-2">
+                        <input class="form-check-input" type="checkbox" name="fileTypes" value="dxf" id="fDxf" checked>
+                        <label class="form-check-label" for="fDxf">
+                            <i class="bi bi-vector-pen me-1"></i>DXF (dimensioned front view)
+                        </label>
+                    </div>
+                </div>
+                <div class="col-md-4 col-6">
+                    <div class="form-check border rounded p-2">
+                        <input class="form-check-input" type="checkbox" name="fileTypes" value="obj" id="fObj" checked>
+                        <label class="form-check-label" for="fObj">
+                            <i class="bi bi-badge-3d me-1"></i>OBJ (3D mesh / browser preview)
+                        </label>
+                    </div>
+                </div>
+                <div class="col-md-4 col-6">
+                    <div class="form-check border rounded p-2">
+                        <input class="form-check-input" type="checkbox" name="fileTypes" value="pdf" id="fPdf">
+                        <label class="form-check-label" for="fPdf">
+                            <i class="bi bi-file-earmark-pdf me-1"></i>PDF (drawing sheet)
+                        </label>
+                    </div>
+                </div>
+                <div class="col-md-4 col-6">
+                    <div class="form-check border rounded p-2">
+                        <input class="form-check-input" type="checkbox" name="fileTypes" value="allparts" id="fAll">
+                        <label class="form-check-label" for="fAll">
+                            <i class="bi bi-grid-3x3-gap me-1"></i>Full fabrication sheet (all views + 5 part details)
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <button type="submit" class="btn btn-primary" id="generateBtn" disabled>
+                <i class="bi bi-cpu me-1"></i>Generate CAD
+            </button>
+            <small class="text-muted d-block mt-2">
+                Generation builds the full 3D solid in one pass (up to ~2 minutes); the checkboxes above just control which download links are shown afterward.
+            </small>
+        </form>
+    </div>
+</div>
+
+@section Scripts {
+<script>
+(function () {
+    const projectSelect = document.getElementById('projectSelect');
+    const designSelect = document.getElementById('designSelect');
+    const revisionSelect = document.getElementById('revisionSelect');
+    const generateBtn = document.getElementById('generateBtn');
+    const noResultsHint = document.getElementById('noResultsHint');
+
+    projectSelect.addEventListener('change', async function () {
+        designSelect.innerHTML = '<option value="">Loading&hellip;</option>';
+        designSelect.disabled = true;
+        revisionSelect.innerHTML = '<option value="">Select design first&hellip;</option>';
+        revisionSelect.disabled = true;
+        generateBtn.disabled = true;
+        noResultsHint.classList.add('d-none');
+
+        if (!this.value) {
+            designSelect.innerHTML = '<option value="">Select project first&hellip;</option>';
+            return;
+        }
+
+        const res = await fetch('@Url.Action("GetDesigns")?projectId=' + this.value);
+        const designs = await res.json();
+
+        designSelect.innerHTML = '<option value="">Select design&hellip;</option>' +
+            designs.map(d => `<option value="${d.id}">${(d.tagNumber || d.name || ('Design #' + d.id))}</option>`).join('');
+        designSelect.disabled = designs.length === 0;
+    });
+
+    designSelect.addEventListener('change', async function () {
+        revisionSelect.innerHTML = '<option value="">Loading&hellip;</option>';
+        revisionSelect.disabled = true;
+        generateBtn.disabled = true;
+        noResultsHint.classList.add('d-none');
+
+        if (!this.value) {
+            revisionSelect.innerHTML = '<option value="">Select design first&hellip;</option>';
+            return;
+        }
+
+        const res = await fetch('@Url.Action("GetRevisions")?designId=' + this.value);
+        const revisions = await res.json();
+
+        revisionSelect.innerHTML = '<option value="">Select revision&hellip;</option>' +
+            revisions.map(r => `<option value="${r.id}" data-hasresults="${r.hasResults}">Rev ${r.revisionNumber}${r.hasResults ? '' : ' (not calculated)'}</option>`).join('');
+        revisionSelect.disabled = revisions.length === 0;
+    });
+
+    revisionSelect.addEventListener('change', function () {
+        const opt = this.options[this.selectedIndex];
+        const hasResults = opt && opt.dataset.hasresults === 'true';
+        generateBtn.disabled = !this.value || !hasResults;
+        noResultsHint.classList.toggle('d-none', !this.value || hasResults);
+    });
+
+    document.getElementById('cadForm').addEventListener('submit', function () {
+        generateBtn.disabled = true;
+        generateBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Generating&hellip; (up to ~2 min)';
+    });
+})();
+</script>
+}

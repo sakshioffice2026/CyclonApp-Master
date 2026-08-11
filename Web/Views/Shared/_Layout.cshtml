@@ -62,9 +62,15 @@
                 </a>
 
                 <div class="nav-section-label mt-3">Reports</div>
-                <a class="sidebar-link" href="@Url.Action("Index","Export")">
+                <a class="sidebar-link @(ViewContext.RouteData.Values["controller"]?.ToString() == "Export" ? "active" : "")"
+                   href="@Url.Action("Index","Export")">
                     <i class="bi bi-file-earmark-pdf"></i>
                     <span>Export / Reports</span>
+                </a>
+                <a class="sidebar-link @(ViewContext.RouteData.Values["controller"]?.ToString() == "Cad" ? "active" : "")"
+                   href="@Url.Action("Index","Cad")">
+                    <i class="bi bi-box"></i>
+                    <span>3D / CAD</span>
                 </a>
 
             @*     @if (User.IsInRole("SuperAdmin") || User.IsInRole("ClientAdmin"))

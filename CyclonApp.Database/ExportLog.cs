@@ -18,5 +18,5 @@
         public DateTime ExportedAt { get; set; } = DateTime.UtcNow;
     }
 
-    public enum ExportType { PDF, Excel }
+    public enum ExportType { PDF, Excel, STEP, DXF, OBJ, CadBundle }
 }

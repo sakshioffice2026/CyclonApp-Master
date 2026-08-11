@@ -1,0 +1,91 @@
+﻿@model CyclonApp.Model.ViewModel.CadViewModel
+@{
+    ViewData["Title"] = "CAD Result";
+    Layout = "_Layout";
+    var sel = Model.SelectedFileTypes ?? new List<string>();
+    bool Want(string key) => sel.Count == 0 || sel.Contains(key);
+}
+
+<script type="module" src="https://cdnjs.cloudflare.com/ajax/libs/model-viewer/3.4.0/model-viewer.min.js"></script>
+
+<div class="page-header">
+    <div>
+        <h1 class="page-title"><i class="bi bi-box me-2 text-primary"></i>CAD Result</h1>
+        <p class="page-subtitle">
+            <strong class="text-mono">@Model.TagNumber</strong> &mdash; Rev @Model.RevisionNumber
+        </p>
+    </div>
+    <a href="@Url.Action("Index")" class="btn btn-outline-secondary btn-sm">
+        <i class="bi bi-arrow-left me-1"></i>Generate Another
+    </a>
+</div>
+
+@if (!string.IsNullOrEmpty(Model.ErrorMessage))
+{
+    <div class="alert alert-danger"><i class="bi bi-exclamation-triangle me-2"></i>@Model.ErrorMessage</div>
+}
+
+@if (Model.Result != null)
+{
+    <div class="row g-4">
+        <div class="col-lg-5">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title"><i class="bi bi-download me-2 text-primary"></i>Downloads</h5>
+                </div>
+                <div class="list-group list-group-flush">
+                    @if (Want("step") && !string.IsNullOrEmpty(Model.Result.StepUrl))
+                    {
+                        <a href="@Model.Result.StepUrl" class="list-group-item list-group-item-action" download>
+                            <i class="bi bi-box-seam me-2"></i>STEP solid (.step)
+                        </a>
+                    }
+                    @if (Want("dxf") && !string.IsNullOrEmpty(Model.Result.DxfUrl))
+                    {
+                        <a href="@Model.Result.DxfUrl" class="list-group-item list-group-item-action" download>
+                            <i class="bi bi-vector-pen me-2"></i>Dimensioned front-view DXF
+                        </a>
+                    }
+                    @if (Want("allparts") && !string.IsNullOrEmpty(Model.Result.AllPartsDxfUrl))
+                    {
+                        <a href="@Model.Result.AllPartsDxfUrl" class="list-group-item list-group-item-action" download>
+                            <i class="bi bi-grid-3x3-gap me-2"></i>Full fabrication sheet
+                        </a>
+                    }
+                    @if (Want("pdf") && !string.IsNullOrEmpty(Model.Result.PdfUrl))
+                    {
+                        <a href="@Model.Result.PdfUrl" class="list-group-item list-group-item-action" download>
+                            <i class="bi bi-file-earmark-pdf me-2"></i>Drawing PDF
+                        </a>
+                    }
+                    @if (Want("obj") && !string.IsNullOrEmpty(Model.Result.ObjUrl))
+                    {
+                        <a href="@Model.Result.ObjUrl" class="list-group-item list-group-item-action" download>
+                            <i class="bi bi-badge-3d me-2"></i>OBJ mesh
+                        </a>
+                    }
+                </div>
+            </div>
+        </div>
+
+        <div class="col-lg-7">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h5 class="card-title"><i class="bi bi-eye me-2 text-primary"></i>3D Preview</h5>
+                </div>
+                <div class="card-body d-flex align-items-center justify-content-center" style="min-height:420px;">
+                    @if (!string.IsNullOrEmpty(Model.Result.ObjUrl))
+                    {
+                        <model-viewer src="@Model.Result.ObjUrl" camera-controls auto-rotate
+                                      style="width:100%;height:420px;background:#f8fafc;border-radius:8px;">
+                        </model-viewer>
+                    }
+                    else
+                    {
+                        <p class="text-muted">No OBJ mesh available for preview.</p>
+                    }
+                </div>
+            </div>
+        </div>
+    </div>
+}

@@ -49,6 +49,7 @@ builder.Services.AddScoped<ExceptionHandlerRepository>();
 builder.Services.AddHttpClient("CyclonePrediction"); // name must match CreateClient("CyclonePrediction") in the repository
 builder.Services.AddScoped<ICyclonePrediction, CyclonePredictionRepository>();
 builder.Services.AddScoped<IEngineeringInsight, EngineeringInsightRepository>();
+builder.Services.AddScoped<ICadGeneration, CadGenerationRepository>(); // shares the "CyclonePrediction" HttpClient + BaseUrl config with field prediction
 builder.Services.AddSingleton<CycloneFieldOnnxPredictorProvider>(sp =>
 {
     var env = sp.GetRequiredService<IWebHostEnvironment>();

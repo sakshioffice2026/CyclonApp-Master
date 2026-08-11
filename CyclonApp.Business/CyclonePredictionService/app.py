@@ -94,8 +94,30 @@ from field_turbulence import hydraulic_diameter_rect_m, inlet_turbulence_quantit
 from sanity_check import mass_conservation_metrics, compute_pressure_drop
 from render_field import render_cyclone_field
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Cyclone Prediction Service (Physics-Informed)")
+
+# The .NET Web app (https://localhost:7246 in dev) fetches /cad-exports/*
+# files directly from the browser — e.g. <model-viewer src="...cyclone.obj">
+# for the 3D preview — which is a cross-origin request from the browser's
+# point of view (different scheme+port than this service). Without CORS
+# headers the browser blocks it outright, even though the .NET *server*
+# can reach this service fine (server-to-server calls, like /generate_cad
+# itself, aren't subject to CORS at all — only browser-initiated fetches
+# are). allow_origins is read from an env var so prod can restrict it to
+# the real deployed Web app origin instead of the dev localhost ports.
+_cors_origins = os.environ.get(
+    "CORS_ALLOWED_ORIGINS",
+    "https://localhost:7246,http://localhost:7246,http://localhost:5000,https://localhost:5001",
+).split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors_origins if o.strip()],
+    allow_credentials=False,
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 
 # Where per-job CFD PNGs land, and the URL prefix they're served under.
 # One subfolder per job_id so concurrent jobs (MAX_CONCURRENT_FIELD_JOBS)
