@@ -1,36 +1,26 @@
-﻿"""
+"""
 add_dxf_dimensions.py
 ----------------------
-Adds real engineering dimensions (extension lines + dimension line +
-arrowheads + numeric mm text) to a cyclone front-view DXF, matching
-standard 2D industrial blueprint style - not TEXT labels pointing at
-the drawing.
+Adds real engineering dimensions to the existing cyclone DXF and, as the
+composition stage, publishes a single-sheet A3 engineering drawing using the
+already-generated principal-view and component/detail DXFs.
 
-Why ezdxf, not FreeCAD/TechDraw: TechDraw's own dimension objects need
-the GUI (TechDrawGui) to compute/render reliably in headless
-freecadcmd, and driving them from Python is brittle. ezdxf works
-directly on the exported DXF, is headless-safe, and creates true DXF
-DIMENSION entities that AutoCAD/LibreCAD/any CAD viewer renders and
-measures like any other dimension - the actual requirement here.
-
-Coordinate system: matches _export_view_dxf's front view
-(direction = Vector(0, -1, 0), i.e. looking along -Y), so the DXF
-plane is X (radial, mm) horizontal / Z (vertical, mm) vertical -
-identical to cad_generator._build_cyclone_shape's own coordinates.
-All dimension positions below are re-derived from dims_mm using those
-same formulas, so they always match the actual exported geometry
-regardless of which optional fields were supplied vs defaulted.
-
-Usage:
-    from add_dxf_dimensions import add_engineering_dimensions
-    add_engineering_dimensions("cyclone_front.dxf", dims_mm)
+The cyclone geometry itself is not regenerated here.  The original combined
+DXF is retained as cyclone_assembly.dxf; the public cyclone.dxf becomes the
+single-sheet drawing so existing API consumers receive the requested drawing
+as the primary DXF deliverable.
 """
 
 from __future__ import annotations
+
+import os
 import ezdxf
 
+from drawing_sheet_composer import compose_engineering_sheet
 
-def add_engineering_dimensions(dxf_path: str, dims_mm: dict, out_path: str | None = None) -> str:
+
+def _add_engineering_dimensions_to_file(dxf_path: str, dims_mm: dict) -> str:
+    """Add true DXF DIMENSION entities to an existing flat front-view DXF."""
     barrel_d = dims_mm["BarrelDiameterMm"]
     barrel_h = dims_mm["BarrelHeightMm"]
     cone_h = dims_mm["ConeHeightMm"]
@@ -51,23 +41,20 @@ def add_engineering_dimensions(dxf_path: str, dims_mm: dict, out_path: str | Non
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
 
-    # ISO-style dimension style: arrows, extension-line offset/extension,
-    # text above the dimension line, whole-mm auto text.
     style_name = "CYCLONE-ISO"
     if style_name not in doc.dimstyles:
         ds = doc.dimstyles.new(style_name)
-        ds.dxf.dimtxt = 12    # text height, mm
-        ds.dxf.dimasz = 8     # arrowhead size, mm
-        ds.dxf.dimexo = 5     # extension line offset from the part outline
-        ds.dxf.dimexe = 5     # extension line overshoot past the dim line
-        ds.dxf.dimtad = 1     # text placed above the dimension line
-        ds.dxf.dimdec = 0     # 0 decimal places
+        ds.dxf.dimtxt = 12
+        ds.dxf.dimasz = 8
+        ds.dxf.dimexo = 5
+        ds.dxf.dimexe = 5
+        ds.dxf.dimtad = 1
+        ds.dxf.dimdec = 0
         ds.dxf.dimclrd = 7
         ds.dxf.dimclre = 7
         ds.dxf.dimclrt = 7
 
     def vdim(x, z1, z2, offset_x, text=None):
-        """Vertical linear dimension between two heights at a fixed X."""
         dim = msp.add_linear_dim(
             base=(x + offset_x, (z1 + z2) / 2.0),
             p1=(x, z1), p2=(x, z2),
@@ -76,7 +63,6 @@ def add_engineering_dimensions(dxf_path: str, dims_mm: dict, out_path: str | Non
         dim.render()
 
     def hdim(z, x1, x2, offset_z, text=None):
-        """Horizontal linear dimension between two X positions at a fixed Z."""
         dim = msp.add_linear_dim(
             base=((x1 + x2) / 2.0, z + offset_z),
             p1=(x1, z), p2=(x2, z),
@@ -84,24 +70,73 @@ def add_engineering_dimensions(dxf_path: str, dims_mm: dict, out_path: str | Non
         )
         dim.render()
 
-    # ---- Vertical (height) dimensions, staggered to the right ----
-    vdim(barrel_r, 0, barrel_h, offset_x=40)                          # barrel height
-    vdim(barrel_r, -cone_h, 0, offset_x=40)                           # cone height
-    vdim(barrel_r, exhaust_bottom_z, exhaust_top_z, offset_x=80)      # exhaust length
-    vdim(bottom_outlet / 2.0, dust_pipe_bottom_z, -cone_h, offset_x=40)  # dust stub
-    vdim(barrel_r + 40, duct_z0, duct_z0 + inlet_h, offset_x=40)      # inlet height
+    vdim(barrel_r, 0, barrel_h, 40)
+    vdim(barrel_r, -cone_h, 0, 40)
+    vdim(barrel_r, exhaust_bottom_z, exhaust_top_z, 80)
+    vdim(bottom_outlet / 2.0, dust_pipe_bottom_z, -cone_h, 40)
+    vdim(barrel_r + 40, duct_z0, duct_z0 + inlet_h, 40)
 
-    # ---- Horizontal (diameter) dimensions, staggered below/above ----
-    hdim(-cone_h - dust_stub - 20, -barrel_r, barrel_r, offset_z=-30,
+    hdim(-cone_h - dust_stub - 20, -barrel_r, barrel_r, -30,
          text=f"D{barrel_d:.0f}")
-    hdim(-cone_h - dust_stub - 60, -bottom_outlet / 2.0, bottom_outlet / 2.0,
-         offset_z=-30, text=f"D{bottom_outlet:.0f}")
-    hdim(exhaust_top_z + 30, -pipe_r, pipe_r, offset_z=20,
+    hdim(-cone_h - dust_stub - 60, -bottom_outlet / 2.0, bottom_outlet / 2.0, -30,
+         text=f"D{bottom_outlet:.0f}")
+    hdim(exhaust_top_z + 30, -pipe_r, pipe_r, 20,
          text=f"D{exhaust_d:.0f}")
 
-    out_path = out_path or dxf_path
-    doc.saveas(out_path)
-    return out_path
+    doc.saveas(dxf_path)
+    return dxf_path
+
+
+def add_engineering_dimensions(dxf_path: str, dims_mm: dict, out_path: str | None = None) -> str:
+    """
+    Preserve the existing dimensioned assembly DXF and then compose the
+    generated orthographic/detail DXFs into one intentionally arranged sheet.
+
+    The original API path remains the same: cyclone.dxf is replaced by the
+    requested single-sheet drawing, while cyclone_assembly.dxf preserves the
+    previous combined assembly DXF.
+    """
+    output_dir = os.path.dirname(os.path.abspath(dxf_path))
+    raw_assembly_path = os.path.join(output_dir, "cyclone_assembly.dxf")
+    sheet_path = out_path or dxf_path
+
+    # Preserve the existing combined assembly DXF before composition.
+    _add_engineering_dimensions_to_file(dxf_path, dims_mm)
+    if os.path.abspath(raw_assembly_path) != os.path.abspath(dxf_path):
+        os.replace(dxf_path, raw_assembly_path)
+
+    view_paths = {
+        "front": os.path.join(output_dir, "cyclone_front.dxf"),
+        "top": os.path.join(output_dir, "cyclone_top.dxf"),
+        "side": os.path.join(output_dir, "cyclone_side.dxf"),
+    }
+    section_paths = {
+        "barrel": os.path.join(output_dir, "barrel.dxf"),
+        "cone": os.path.join(output_dir, "cone.dxf"),
+        "air_out_pipe": os.path.join(output_dir, "air_out_pipe.dxf"),
+        "dust_outlet_pipe": os.path.join(output_dir, "dust_outlet_pipe.dxf"),
+        "inlet_duct": os.path.join(output_dir, "inlet_duct.dxf"),
+    }
+
+    missing = [p for p in list(view_paths.values()) + list(section_paths.values()) if not os.path.isfile(p)]
+    if missing:
+        # Restore the legacy path if composition cannot run.  This keeps CAD
+        # generation backward-compatible on installations missing a section.
+        os.replace(raw_assembly_path, dxf_path)
+        raise FileNotFoundError(
+            "Single-sheet composition requires all generated view/detail DXFs; "
+            f"missing: {', '.join(missing)}"
+        )
+
+    revision_id = os.path.basename(os.path.normpath(output_dir))
+    compose_engineering_sheet(
+        view_paths=view_paths,
+        section_paths=section_paths,
+        output_path=sheet_path,
+        dims=dims_mm,
+        revision_id=revision_id,
+    )
+    return sheet_path
 
 
 if __name__ == "__main__":
@@ -110,4 +145,4 @@ if __name__ == "__main__":
         "ExhaustDiaMm": 150, "ExhaustLengthMm": 180, "BottomOutletMm": 100,
         "InletHeightMm": 150, "InletWidthMm": 60,
     }
-    add_engineering_dimensions("cyclone_front.dxf", sample_dims)
+    add_engineering_dimensions("cyclone.dxf", sample_dims)
