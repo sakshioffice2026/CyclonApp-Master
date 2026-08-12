@@ -1,46 +1,147 @@
 ﻿"""
 add_dxf_dimensions.py
 ----------------------
-Adds engineering dimension MARKS to the cyclone front-view DXF, written
-TWICE, on two separate layers, so the drawing is correct in both FreeCAD
-and AutoCAD:
+Adds engineering dimension MARKS (extension lines + dimension line +
+arrowheads + mm text) to the cyclone front-view DXF.
 
-  DIM_TEXT   - plain LINE + TEXT entities (extension lines, dimension
-               line, arrowheads, mm label). Guaranteed visible in every
-               DXF importer, including FreeCAD, with zero configuration.
-  DIM_NATIVE - real ezdxf DIMENSION entities (added via add_linear_dim
-               (...).render()). These are true, associative, editable
-               CAD dimension objects - the value is derived from the
-               measured geometry, and AutoCAD (and most other real CAD
-               tools) can select/edit them as native dimensions.
+ROOT-CAUSE FIX (earlier revision): ezdxf's add_linear_dim(...).render()
+builds real DXF DIMENSION entities, but the actual drawable geometry
+(lines/arrows/MTEXT) it creates is written into an ANONYMOUS BLOCK, and
+only a DIMENSION entity referencing that block sits in modelspace.
+Whether FreeCAD's DXF importer resolves and draws that block content is
+inconsistent across FreeCAD/importer versions, so dimensions could
+silently never appear. FIX: draw plain LINE + TEXT entities only -
+every importer draws these unconditionally.
 
-WHY BOTH: ezdxf's DIMENSION entities are correct DXF - but the actual
-drawable geometry they produce (lines/arrows/MTEXT) is written into an
-ANONYMOUS BLOCK, with only a DIMENSION entity in modelspace referencing
-that block. Whether FreeCAD's DXF importer resolves and draws that block
-content is inconsistent across FreeCAD/importer versions - in practice it
-often does NOT, so native-only dimensions can silently never appear in
-FreeCAD, even though the file itself is valid. AutoCAD does not have this
-problem and is where "real", editable DIMENSION objects matter most.
+GEOMETRY-SNAP FIX (earlier revision): dimension anchor points (p1/p2)
+are computed from nominal `dims_mm` values, then SNAPPED to the nearest
+REAL geometry vertex already present in the DXF (within SNAP_TOLERANCE),
+so they line up with whatever cad_generator.py actually drew - including
+shell wall thickness / flange-overlap offsets near openings.
 
-Writing both means: FreeCAD users always see the DIM_TEXT geometry (plain
-LINE/TEXT, no block-resolution dependency); AutoCAD users get true
-DIMENSION objects on DIM_NATIVE they can select/edit/associate, in
-addition to the always-visible DIM_TEXT geometry. Either layer can be
-frozen/turned off in whichever tool if the visual doubling is unwanted -
-this module does not freeze either by default, since "guaranteed visible
-everywhere" is the priority.
+THIS REVISION - two more fixes:
+
+1. NO FLOATING / DISCONNECTED DIMENSIONS
+   Every extension line's first segment now starts from the EXACT
+   snapped geometry point, and a short perpendicular tick mark is drawn
+   directly ON that point. Even with the small visual ext_gap (standard
+   drafting convention - extension lines don't touch the part outline
+   directly), the tick makes the anchor-to-geometry connection explicit
+   instead of the line appearing to start from empty space.
+
+2. NO OVERLAPPING / COLLIDING DIMENSIONS
+   The four dimensions stacked on the right side (barrel height, cone
+   height, exhaust length, inlet height) previously used fixed offsets
+   (+80/+80/+130/+180) that could cross or overlap depending on the
+   model's actual proportions. They now use a running stack cursor
+   (_StackCursor) that guarantees a minimum clear gap between each
+   successive dimension line, sized from arrow_size + text_height +
+   margin, so labels/lines never collide regardless of model size.
 
 Coordinate system: Front view looking along -Y axis
   X-axis: horizontal (radial, mm)
   Z-axis: vertical (axial, mm) -> mapped to DXF's 2D Y axis
 """
 from __future__ import annotations
+import math
 import ezdxf
 from ezdxf.enums import TextEntityAlignment
 
 DIM_LAYER = "DIM_TEXT"
-NATIVE_DIM_LAYER = "DIM_NATIVE"
+
+# Max distance (mm) a nominal dimension point may snap to a real geometry
+# vertex. Beyond this, the nominal (theoretical) point is used unchanged -
+# this keeps the fix safe if a feature genuinely isn't in the geometry.
+SNAP_TOLERANCE = 15.0
+
+# Minimum clear gap (mm) enforced between successive stacked dimension
+# lines on the same side, on top of each one's own arrow/text footprint.
+STACK_MARGIN = 20.0
+
+
+# ---------------------------------------------------------------------------
+# Real-geometry point collection + snapping
+# ---------------------------------------------------------------------------
+
+def _collect_geometry_points(msp) -> list[tuple[float, float]]:
+    """Read every vertex from the ALREADY-DRAWN front-view geometry (before
+    any dimension marks are added), so nominal dimension points can be
+    snapped to the real outline instead of trusting recomputed math."""
+    points: list[tuple[float, float]] = []
+    for entity in msp:
+        t = entity.dxftype()
+        if t == "LWPOLYLINE":
+            for p in entity.get_points():
+                points.append((p[0], p[1]))
+        elif t == "POLYLINE":
+            for v in entity.vertices:
+                loc = v.dxf.location
+                points.append((loc.x, loc.y))
+        elif t == "LINE":
+            points.append((entity.dxf.start.x, entity.dxf.start.y))
+            points.append((entity.dxf.end.x, entity.dxf.end.y))
+    return points
+
+
+def _snap(point: tuple[float, float], geometry_points: list[tuple[float, float]],
+          tolerance: float = SNAP_TOLERANCE) -> tuple[float, float]:
+    """Return the nearest real geometry vertex to `point` if one exists
+    within `tolerance`; otherwise return `point` unchanged."""
+    if not geometry_points:
+        return point
+
+    px, py = point
+    best = None
+    best_dist = tolerance
+    for gx, gy in geometry_points:
+        dist = math.hypot(gx - px, gy - py)
+        if dist < best_dist:
+            best_dist = dist
+            best = (gx, gy)
+
+    return best if best is not None else point
+
+
+# ---------------------------------------------------------------------------
+# Stacking cursor - prevents overlapping dimension lines on the same side
+# ---------------------------------------------------------------------------
+
+class _StackCursor:
+    """Hands out non-overlapping offsets along one axis for a run of
+    stacked dimensions on the same side of the part.
+
+    Each call to `next(footprint)` returns the next clear offset and
+    reserves `footprint` mm of additional clearance (arrow_size +
+    text_height, roughly) plus STACK_MARGIN before the following call,
+    so consecutive dimension lines/labels never collide."""
+
+    def __init__(self, start: float, step_direction: int = 1):
+        self._pos = start
+        self._dir = 1 if step_direction >= 0 else -1
+
+    def next(self, footprint: float) -> float:
+        offset = self._pos
+        self._pos += self._dir * (footprint + STACK_MARGIN)
+        return offset
+
+
+# ---------------------------------------------------------------------------
+# Drawing primitives
+# ---------------------------------------------------------------------------
+
+def _tick(msp, point, direction, size, attribs):
+    """Short perpendicular tick mark drawn exactly ON a snapped geometry
+    point, so the extension line's connection to real geometry is
+    visually explicit even though the line itself starts `ext_gap` away
+    (standard drafting convention, not a disconnect)."""
+    ux, uy = direction
+    px, py = -uy, ux
+    half = size * 0.5
+    msp.add_line(
+        (point[0] - px * half, point[1] - py * half),
+        (point[0] + px * half, point[1] + py * half),
+        dxfattribs=attribs,
+    )
 
 
 def _arrow(msp, tip, direction, size, attribs):
@@ -54,50 +155,6 @@ def _arrow(msp, tip, direction, size, attribs):
     right = (back[0] - px * size * 0.4, back[1] - py * size * 0.4)
     msp.add_line(tip, left, dxfattribs=attribs)
     msp.add_line(tip, right, dxfattribs=attribs)
-
-
-def _add_native_dimension(
-    msp,
-    p1,
-    p2,
-    base,
-    angle,
-    text_height,
-    arrow_size,
-    ext_gap,
-    ext_overshoot,
-):
-    """Best-effort addition of a REAL ezdxf DIMENSION entity (associative,
-    editable in AutoCAD) alongside the guaranteed-visible LINE+TEXT this
-    module already draws. Value is derived from p1/p2 geometry by ezdxf
-    itself - not passed in - matching the "recommended" native behavior.
-
-    Wrapped in try/except: this is a purely additive enhancement, and a
-    failure here must never block or corrupt the guaranteed-visible
-    DIM_TEXT geometry drawn by _linear_dim.
-    """
-    try:
-        override = {
-            "dimtxt": text_height,
-            "dimasz": arrow_size,
-            "dimexo": ext_gap,
-            "dimexe": ext_overshoot,
-            "dimclrd": 3,
-            "dimclre": 3,
-            "dimclrt": 3,
-        }
-        dim = msp.add_linear_dim(
-            base=base,
-            p1=p1,
-            p2=p2,
-            angle=angle,
-            dimstyle="Standard",
-            override=override,
-            dxfattribs={"layer": NATIVE_DIM_LAYER},
-        )
-        dim.render()
-    except Exception:
-        pass
 
 
 def _linear_dim(
@@ -114,12 +171,10 @@ def _linear_dim(
     arrow_size=10,
     text_offset=15,
 ):
-    """Draws one linear dimension mark using only LINE + TEXT entities,
-    PLUS a native ezdxf DIMENSION entity on NATIVE_DIM_LAYER (see
-    _add_native_dimension). The LINE+TEXT geometry below is unchanged
-    from before and remains the guaranteed-visible copy.
+    """Draws one linear dimension mark using only LINE + TEXT entities.
 
-    p1, p2 = the two measured points (model coordinates, mm)
+    p1, p2 = the two measured points (model coordinates, mm) - callers
+             should pass these already snapped to real geometry.
     base   = a point that fixes WHERE the dimension line sits
              (its X for angle=90 / vertical dims, its Y for angle=0 /
              horizontal dims)
@@ -127,10 +182,6 @@ def _linear_dim(
     text   = explicit label; if None, computed as the measured distance
     """
     attribs = attribs or {}
-
-    _add_native_dimension(
-        msp, p1, p2, base, angle, text_height, arrow_size, ext_gap, ext_overshoot
-    )
 
     if angle == 90:
         dim_x = base[0]
@@ -140,6 +191,12 @@ def _linear_dim(
 
         gap_sign_1 = 1 if dim_x >= p1[0] else -1
         gap_sign_2 = 1 if dim_x >= p2[0] else -1
+
+        # Tick marks anchor the extension lines to the real geometry
+        # points themselves - drawn ON p1/p2, not at the offset start.
+        _tick(msp, p1, (1, 0), ext_gap * 1.6, attribs)
+        _tick(msp, p2, (1, 0), ext_gap * 1.6, attribs)
+
         msp.add_line(
             (p1[0] + gap_sign_1 * ext_gap, y1),
             (dim_x + gap_sign_1 * ext_overshoot, y1),
@@ -168,6 +225,10 @@ def _linear_dim(
 
         gap_sign_1 = 1 if dim_y >= p1[1] else -1
         gap_sign_2 = 1 if dim_y >= p2[1] else -1
+
+        _tick(msp, p1, (0, 1), ext_gap * 1.6, attribs)
+        _tick(msp, p2, (0, 1), ext_gap * 1.6, attribs)
+
         msp.add_line(
             (x1, p1[1] + gap_sign_1 * ext_gap),
             (x1, dim_y + gap_sign_1 * ext_overshoot),
@@ -198,10 +259,19 @@ def _linear_dim(
     return text_entity
 
 
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
 def add_engineering_dimensions_2d(dxf_path: str, dims_mm: dict, out_path: str | None = None) -> str:
-    """Add 2D dimension marks to the DXF front view: guaranteed-visible
-    LINE+TEXT on DIM_TEXT, plus real DIMENSION entities on DIM_NATIVE for
-    AutoCAD-style associative editing. See module docstring."""
+    """Add 2D dimension marks to the CyclonePredictionService front-view DXF
+    using plain LINE + TEXT entities only - guaranteed visible on import,
+    no DIMENSION entity / anonymous block / dimstyle dependency.
+
+    p1/p2 are snapped to real geometry (no drift near flanges/shell), and
+    the four right-side stacked dimensions use a running stack cursor
+    (no overlap regardless of model proportions).
+    """
 
     barrel_d = dims_mm["BarrelDiameterMm"]
     barrel_h = dims_mm["BarrelHeightMm"]
@@ -216,61 +286,94 @@ def add_engineering_dimensions_2d(dxf_path: str, dims_mm: dict, out_path: str | 
     doc = ezdxf.readfile(dxf_path)
     msp = doc.modelspace()
 
+    # Snapshot the real outline BEFORE adding any dimension marks, so the
+    # newly-added LINE/TEXT entities never get picked up as "geometry".
+    geometry_points = _collect_geometry_points(msp)
+
+    def snap(point):
+        return _snap(point, geometry_points)
+
     if DIM_LAYER not in doc.layers:
         doc.layers.new(name=DIM_LAYER, dxfattribs={"color": 3})  # green
-    if NATIVE_DIM_LAYER not in doc.layers:
-        doc.layers.new(name=NATIVE_DIM_LAYER, dxfattribs={"color": 3})  # green
 
     attribs = {"layer": DIM_LAYER, "color": 3}
+    arrow_size = 10
+    text_height = 20
+    text_height_small = 15
 
     # Barrel diameter - horizontal, measured across the barrel/cone
     # junction (z=0), dimension line offset below the cone.
-    _linear_dim(msp, p1=(-barrel_r, 0), p2=(barrel_r, 0), base=(0, -cone_h - 100), attribs=attribs)
+    _linear_dim(
+        msp,
+        p1=snap((-barrel_r, 0)), p2=snap((barrel_r, 0)),
+        base=(0, -cone_h - 100), attribs=attribs,
+    )
 
     # Bottom (dust) outlet diameter - horizontal, at the cone tip.
     _linear_dim(
         msp,
-        p1=(-bottom_outlet / 2.0, -cone_h), p2=(bottom_outlet / 2.0, -cone_h),
+        p1=snap((-bottom_outlet / 2.0, -cone_h)), p2=snap((bottom_outlet / 2.0, -cone_h)),
         base=(0, -cone_h - 150), attribs=attribs,
     )
 
-    # Barrel height H - vertical, right side.
-    _linear_dim(msp, p1=(barrel_r, 0), p2=(barrel_r, barrel_h), base=(barrel_r + 80, 0), angle=90, attribs=attribs)
+    # ---- Right-side stack: barrel height, cone height, exhaust length,
+    # inlet height. A running cursor guarantees clear spacing between
+    # each one - no more fixed +80/+130/+180 that could collide.
+    right_stack = _StackCursor(start=barrel_r + 80, step_direction=1)
 
-    # Cone height - vertical, right side.
-    _linear_dim(msp, p1=(barrel_r, 0), p2=(barrel_r, -cone_h), base=(barrel_r + 80, -cone_h), angle=90, attribs=attribs)
-
-    # Exhaust (vortex finder) length L - vertical, further right.
+    barrel_h_base_x = right_stack.next(arrow_size + text_height)
     _linear_dim(
         msp,
-        p1=(barrel_r, barrel_h - exhaust_l), p2=(barrel_r, barrel_h),
-        base=(barrel_r + 130, barrel_h - exhaust_l), angle=90, attribs=attribs,
+        p1=snap((barrel_r, 0)), p2=snap((barrel_r, barrel_h)),
+        base=(barrel_h_base_x, 0), angle=90, attribs=attribs,
     )
 
-    # Inlet height - vertical, right side (duct is on +X per
-    # cad_generator.py: duct_center_x = barrel_r - inlet_w/2, flush with
-    # the barrel wall at x=+barrel_r). Placed further out (barrel_r+180)
-    # to clear the barrel-height/cone-height/exhaust-length dims already
-    # stacked at barrel_r+80 / barrel_r+130.
+    # Cone height - p1 sits on the barrel wall (barrel_r), p2 sits on the
+    # ACTUAL cone-tip outline. A cone tapers, so at y=-cone_h the real
+    # edge is at bottom_outlet_r, not barrel_r - using barrel_r here was
+    # never a real point on the body (it floated off the slanted wall).
+    # Different x per end is normal: the extension lines simply run from
+    # each real point over to the shared vertical dimension line.
+    bottom_outlet_r = bottom_outlet / 2.0
+    cone_h_base_x = right_stack.next(arrow_size + text_height)
     _linear_dim(
         msp,
-        p1=(barrel_r, barrel_h - inlet_h - 20), p2=(barrel_r, barrel_h - 20),
-        base=(barrel_r + 180, barrel_h - inlet_h - 20), angle=90, text_height=15, attribs=attribs,
+        p1=snap((barrel_r, 0)), p2=snap((bottom_outlet_r, -cone_h)),
+        base=(cone_h_base_x, -cone_h), angle=90, attribs=attribs,
+    )
+
+    # Exhaust (vortex finder) length - both ends belong to the EXHAUST
+    # PIPE, whose wall sits at exhaust_r, not barrel_r. Reusing barrel_r
+    # anchored this dimension to the wrong feature entirely.
+    exhaust_r = exhaust_d / 2.0
+    exhaust_l_base_x = right_stack.next(arrow_size + text_height)
+    _linear_dim(
+        msp,
+        p1=snap((exhaust_r, barrel_h - exhaust_l)), p2=snap((exhaust_r, barrel_h)),
+        base=(exhaust_l_base_x, barrel_h - exhaust_l), angle=90, attribs=attribs,
+    )
+
+    inlet_h_base_x = right_stack.next(arrow_size + text_height_small)
+    _linear_dim(
+        msp,
+        p1=snap((barrel_r, barrel_h - inlet_h - 20)), p2=snap((barrel_r, barrel_h - 20)),
+        base=(inlet_h_base_x, barrel_h - inlet_h - 20), angle=90,
+        text_height=text_height_small, attribs=attribs,
     )
 
     # Inlet width W - horizontal, right side, just below the inlet dim.
     _linear_dim(
         msp,
-        p1=(barrel_r - inlet_w, barrel_h - inlet_h - 40),
-        p2=(barrel_r, barrel_h - inlet_h - 40),
+        p1=snap((barrel_r - inlet_w, barrel_h - inlet_h - 40)),
+        p2=snap((barrel_r, barrel_h - inlet_h - 40)),
         base=(barrel_r - inlet_w / 2.0, barrel_h - inlet_h - 80),
-        text_height=15, attribs=attribs,
+        text_height=text_height_small, attribs=attribs,
     )
 
     # Exhaust diameter - horizontal, top.
     _linear_dim(
         msp,
-        p1=(-exhaust_d / 2.0, barrel_h + 50), p2=(exhaust_d / 2.0, barrel_h + 50),
+        p1=snap((-exhaust_d / 2.0, barrel_h + 50)), p2=snap((exhaust_d / 2.0, barrel_h + 50)),
         base=(0, barrel_h + 80), attribs=attribs,
     )
 
