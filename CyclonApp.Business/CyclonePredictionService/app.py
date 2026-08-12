@@ -75,7 +75,7 @@ import os
 import torch
 import ezdxf
 from add_dxf_dimensions import add_engineering_dimensions_2d as add_engineering_dimensions
-from add_dxf_dimensions import convert_dimensions_to_dim_objects
+from add_dxf_dimensions import convert_text_to_dimensions
 from add_dxf_dimensions import validate_units
 from add_dxf_dimensions import validate_geometry_integrity
 from add_dxf_dimensions import reorganize_component_views
@@ -948,7 +948,8 @@ def generate_cad(request: GenerateCadRequest):
     # generation as a whole.
     # ---------------------------------------------------------------
     try:
-        dim_count = convert_dimensions_to_dim_objects(dxf_path)
+        dim_result = convert_text_to_dimensions(dxf_path)
+        dim_count = dim_result.get("converted_count", 0)
         print(
             f"[CAD] Converted dimension marks to {dim_count} DIMENSION entities",
             flush=True,

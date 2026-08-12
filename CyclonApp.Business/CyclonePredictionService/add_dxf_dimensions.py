@@ -53,7 +53,7 @@ DIM_LAYER = "DIM_TEXT"
 # Max distance (mm) a nominal dimension point may snap to a real geometry
 # vertex. Beyond this, the nominal (theoretical) point is used unchanged -
 # this keeps the fix safe if a feature genuinely isn't in the geometry.
-SNAP_TOLERANCE = 15.0
+SNAP_TOLERANCE = 40.0
 
 # Minimum clear gap (mm) enforced between successive stacked dimension
 # lines on the same side, on top of each one's own arrow/text footprint.
@@ -257,7 +257,45 @@ def _linear_dim(
         dxfattribs={**attribs, "height": text_height, "rotation": rotation},
     )
     text_entity.set_placement(text_pos, align=TextEntityAlignment.MIDDLE_CENTER)
+
+    # Stash the EXACT measured points (already snapped to real geometry)
+    # as XDATA, so a later TEXT->DIMENSION conversion step can use these
+    # authoritative points instead of re-guessing p1/p2 from the text
+    # label's position (which is not on the geometry and produces
+    # disconnected/floating dimensions).
+    doc = msp.doc
+    if doc is not None and "DIMPOINTS" not in doc.appids:
+        doc.appids.new("DIMPOINTS")
+    text_entity.set_xdata(
+        "DIMPOINTS",
+        [
+            (1000, f"{p1[0]:.6f},{p1[1]:.6f}"),
+            (1000, f"{p2[0]:.6f},{p2[1]:.6f}"),
+        ],
+    )
+
     return text_entity
+
+
+def _local_right_x(geometry_points: list[tuple[float, float]], target_y: float,
+                    y_window: float = 25.0, fallback: float = 0.0) -> float:
+    """Real wall X at a SPECIFIC height, not the whole body's global max X.
+
+    ROOT-CAUSE FIX: a cyclone body with a side-mounted inlet duct has a
+    right-wall X that varies by height - the duct sticks out further than
+    the barrel wall only over the duct's own height range. Using one
+    global actual_right_x for every dimension (regardless of which height
+    it's actually measuring) makes any dimension measured away from the
+    duct's height aim at an X that has no real geometry near it there -
+    the dimension floats even though SOME vertex in the file is close to
+    that X value, just not at the Y this particular dimension cares about.
+
+    Filters geometry points to a `y_window` band around `target_y` and
+    returns the max X among just those - the true local wall position -
+    falling back to `fallback` (typically the global actual_right_x) if no
+    points fall in that band."""
+    local_xs = [x for x, y in geometry_points if abs(y - target_y) <= y_window]
+    return max(local_xs) if local_xs else fallback
 
 
 # ---------------------------------------------------------------------------
@@ -336,9 +374,13 @@ def add_engineering_dimensions_2d(dxf_path: str, dims_mm: dict, out_path: str | 
     right_stack = _StackCursor(start=actual_right_x + 80, step_direction=1)
 
     barrel_h_base_x = right_stack.next(arrow_size + text_height)
+    # p2's wall X is looked up AT actual_top_y specifically (not the body's
+    # single global max-X) - see _local_right_x. A side-mounted inlet duct
+    # can push the global max X out further than the true wall at the top.
+    top_right_x = _local_right_x(geometry_points, actual_top_y, fallback=actual_right_x)
     _linear_dim(
         msp,
-        p1=snap((actual_right_x, 0)), p2=snap((actual_right_x, actual_top_y)),
+        p1=snap((actual_right_x, 0)), p2=snap((top_right_x, actual_top_y)),
         base=(barrel_h_base_x, 0), angle=90, attribs=attribs,
     )
 
@@ -361,6 +403,10 @@ def add_engineering_dimensions_2d(dxf_path: str, dims_mm: dict, out_path: str | 
         base=(exhaust_l_base_x, actual_top_y - exhaust_l), angle=90, attribs=attribs,
     )
 
+    # Inlet height/width dims are measured AT the inlet duct's own height
+    # range, where the local wall X genuinely IS the (larger) duct-stub X -
+    # unlike barrel height above, no correction needed here since these
+    # dimensions and the duct's protrusion occupy the same height band.
     inlet_h_base_x = right_stack.next(arrow_size + text_height_small)
     _linear_dim(
         msp,
@@ -379,10 +425,14 @@ def add_engineering_dimensions_2d(dxf_path: str, dims_mm: dict, out_path: str | 
         text_height=text_height_small, attribs=attribs,
     )
 
-    # Exhaust diameter - horizontal, top (50mm above actual top of body).
+    # Exhaust diameter - horizontal, top. p1/p2 are the ACTUAL exhaust rim
+    # points (on real geometry) so extension lines connect properly; only
+    # the dimension LINE (base) sits 80mm above the body - the previous
+    # version incorrectly offset p1/p2 themselves by +50, placing the
+    # "measured" points 50mm off the real geometry regardless of snapping.
     _linear_dim(
         msp,
-        p1=snap((-exhaust_r, actual_top_y + 50)), p2=snap((exhaust_r, actual_top_y + 50)),
+        p1=snap((-exhaust_r, actual_top_y)), p2=snap((exhaust_r, actual_top_y)),
         base=(0, actual_top_y + 80), attribs=attribs,
     )
 
@@ -743,12 +793,34 @@ def convert_text_to_dimensions(dxf_path: str, out_path: str | None = None) -> di
     
     for text_data in text_to_convert:
         try:
-            # Find snap points
-            p1, p2 = find_nearest_points((text_data['x'], text_data['y']), geometry_points)
+            # ROOT-CAUSE FIX: prefer the EXACT p1/p2 stashed as XDATA by
+            # _linear_dim (already snapped to real geometry when the
+            # dimension mark was first drawn) over guessing new points
+            # from the TEXT label's position. The label-position guess
+            # (find_nearest_points) grabs whichever geometry vertices
+            # happen to be near the label - unrelated to what's actually
+            # being measured - which is what produced dimensions that
+            # were visually disconnected from the part outline even after
+            # "successful" conversion. XDATA is authoritative when present.
+            entity = text_data['entity']
+            p1 = p2 = None
+            try:
+                xdata = entity.get_xdata("DIMPOINTS")
+                pts = [tag.value for tag in xdata if tag.code == 1000]
+                if len(pts) >= 2:
+                    p1 = tuple(float(v) for v in pts[0].split(","))
+                    p2 = tuple(float(v) for v in pts[1].split(","))
+            except Exception:
+                p1 = p2 = None
+
+            if p1 is None or p2 is None:
+                # Fallback: no XDATA present (e.g. an older file) - guess
+                # from label position, same as before.
+                p1, p2 = find_nearest_points((text_data['x'], text_data['y']), geometry_points)
             
             # STEP 5: Create LINEAR DIMENSION
             # Set dimension style
-            dim_style = doc.dxfattribs.get('DIMSTYLE', 'Standard')
+            dim_style = 'Standard'
             
             # Create dimension using ezdxf's add_linear_dim
             # Definition point (p1 = first definition point, p2 = second definition point)
@@ -756,22 +828,23 @@ def convert_text_to_dimensions(dxf_path: str, out_path: str | None = None) -> di
             mid_x = (p1[0] + p2[0]) / 2
             mid_y = (p1[1] + p2[1]) / 2 + 30  # offset dimension line 30mm above geometry
             
-            new_dim = msp.add_linear_dim(
+            dim_style_override = msp.add_linear_dim(
                 base=(mid_x, mid_y),  # position of dimension line
                 p1=p1,                 # first definition point (snapped to geometry)
                 p2=p2,                 # second definition point (snapped to geometry)
                 angle=0,               # angle of dimension line
+                text=text_data['value'],
                 dxfattribs={
                     'layer': 'DIM_TEXT',
                     'color': 7,
                     'dimstyle': dim_style
                 }
             )
-            
-            # STEP 6: Set dimension text value and render
-            new_dim.dxf.text = text_data['value']
-            new_dim.render()  # Generate dimension geometry
-            
+
+            # STEP 6: Render dimension geometry (draws the block content)
+            dim_style_override.render()
+            new_dim = dim_style_override.dimension  # underlying DIMENSION entity
+
             converted_dimensions.append({
                 'text_value': text_data['value'],
                 'p1': p1,
