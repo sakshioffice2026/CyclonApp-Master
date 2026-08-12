@@ -75,6 +75,10 @@ import os
 import torch
 import ezdxf
 from add_dxf_dimensions import add_engineering_dimensions_2d as add_engineering_dimensions
+from add_dxf_dimensions import convert_dimensions_to_dim_objects
+from add_dxf_dimensions import validate_units
+from add_dxf_dimensions import validate_geometry_integrity
+from add_dxf_dimensions import reorganize_component_views
 from flatten_dxf_front_view import flatten_to_front_view_2d
 from combine_cyclone_sheet import combine_all_into_one_sheet
 
@@ -853,15 +857,9 @@ def generate_cad(request: GenerateCadRequest):
     # that's the file that actually worked. Back to using it.
     dxf_path = result.get("dxf_path")
 
-    if not dxf_path:
-        print(
-            "[CAD] ERROR: FreeCAD did not return a DXF path.",
-            flush=True,
-        )
-        raise HTTPException(
-            500,
-            "CAD geometry was generated, but no DXF path was returned.",
-        )
+    # Validate units consistency (INSUNITS in DXF header)
+    _units = validate_units(dxf_path)
+    print(f"[CAD] DXF units: {_units}", flush=True)
 
     # Flatten the raw 3D wireframe into a genuine flat 2D front-view file
     # BEFORE dimensioning. result["dxf_path"] preserves full 3D X/Y/Z
@@ -918,6 +916,13 @@ def generate_cad(request: GenerateCadRequest):
             flush=True,
         )
 
+        # Validate geometry integrity after dimensioning
+        geom_audit = validate_geometry_integrity(dxf_path)
+        print(
+            f"[CAD] Geometry audit: {geom_audit}",
+            flush=True,
+        )
+
         if line_count == 0:
             raise RuntimeError(
                 "Dimensioning completed, but the DXF contains "
@@ -933,6 +938,26 @@ def generate_cad(request: GenerateCadRequest):
             500,
             "CAD geometry was generated, but engineering "
             f"dimensions could not be added: {e}",
+        )
+
+    # ---------------------------------------------------------------
+    # Convert the just-added TEXT+LINE dimension marks into real DXF
+    # DIMENSION entities (Linear). Non-fatal: if this step fails, the
+    # file already dimensioned above (verified non-zero LINE/TEXT count)
+    # is still returned as-is, so a failure here does not break CAD
+    # generation as a whole.
+    # ---------------------------------------------------------------
+    try:
+        dim_count = convert_dimensions_to_dim_objects(dxf_path)
+        print(
+            f"[CAD] Converted dimension marks to {dim_count} DIMENSION entities",
+            flush=True,
+        )
+    except Exception as e:
+        print(
+            f"[CAD] WARNING: DIMENSION-object conversion failed, "
+            f"keeping TEXT+LINE dimension marks: {e}",
+            flush=True,
         )
 
     # Combine the already-generated per-part + per-view DXFs
@@ -951,6 +976,14 @@ def generate_cad(request: GenerateCadRequest):
     except Exception as e:
         print(f"[CAD] WARNING: combined all-parts sheet failed: {e}", flush=True)
         all_parts_dxf_path = None
+
+    # Reorganize component views to standard 3x3 engineering grid
+    all_parts_dxf_grid_path = os.path.join(os.path.dirname(dxf_path), "cyclone_all_parts_grid.dxf")
+    offset_map = reorganize_component_views(dxf_path, all_parts_dxf_grid_path)
+    print(
+        f"[CAD] Component views reorganized: {list(offset_map.keys())}",
+        flush=True,
+    )
 
     # Convert file paths to URLs
     def _to_url(path):
