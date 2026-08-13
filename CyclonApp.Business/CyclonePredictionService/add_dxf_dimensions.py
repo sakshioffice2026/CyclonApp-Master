@@ -59,6 +59,16 @@ SNAP_TOLERANCE = 40.0
 # lines on the same side, on top of each one's own arrow/text footprint.
 STACK_MARGIN = 20.0
 
+# LOCALIZED TOLERANCE OVERRIDE: exhaust length, inlet height, and inlet
+# width measure to vertices that sit on the inlet duct's own protrusion
+# geometry, which lands beyond the global SNAP_TOLERANCE (40mm) from the
+# nominal computed point on more extreme model proportions. Widening the
+# global tolerance to fix these three would risk snapping OTHER
+# dimensions to the wrong (nearby but unrelated) vertex on complex
+# geometry, so this larger tolerance is applied only at the specific
+# snap() call sites for these three dimensions instead.
+LOCAL_SNAP_TOLERANCE = 150.0
+
 
 # ---------------------------------------------------------------------------
 # Real-geometry point collection + snapping
@@ -329,8 +339,8 @@ def add_engineering_dimensions_2d(dxf_path: str, dims_mm: dict, out_path: str | 
     # newly-added LINE/TEXT entities never get picked up as "geometry".
     geometry_points = _collect_geometry_points(msp)
 
-    def snap(point):
-        return _snap(point, geometry_points)
+    def snap(point, tolerance: float = SNAP_TOLERANCE):
+        return _snap(point, geometry_points, tolerance=tolerance)
 
     # ROOT-CAUSE FIX: flatten_to_front_view_2d's XZ projection shifts the
     # right wall away from nominal +barrel_r (e.g. seam edge lands at +184
@@ -394,33 +404,40 @@ def add_engineering_dimensions_2d(dxf_path: str, dims_mm: dict, out_path: str | 
         base=(cone_h_base_x, actual_bottom_y), angle=90, attribs=attribs,
     )
 
-    # Exhaust (vortex finder) length - both ends on exhaust pipe wall (exhaust_r).
-    exhaust_r = exhaust_d / 2.0
+# Exhaust (vortex finder) length - both ends on exhaust pipe wall (exhaust_r).
+    # DERIVE from geometry: find the actual exhaust pipe wall X position from
+    # the collected geometry points, so dimensions snap to the real pipe edge
+    # rather than the nominal exhaust_d/2 radius which can drift.
+    exhaust_actual_r = max(
+        [p[0] for p in geometry_points if abs(p[0] - actual_right_x) < 50], default=exhaust_d / 2.0
+    )
     exhaust_l_base_x = right_stack.next(arrow_size + text_height)
     _linear_dim(
         msp,
-        p1=snap((exhaust_r, actual_top_y - exhaust_l)), p2=snap((exhaust_r, actual_top_y)),
+        p1=snap((exhaust_actual_r, actual_top_y - exhaust_l), tolerance=LOCAL_SNAP_TOLERANCE),
+        p2=snap((exhaust_actual_r, actual_top_y), tolerance=LOCAL_SNAP_TOLERANCE),
         base=(exhaust_l_base_x, actual_top_y - exhaust_l), angle=90, attribs=attribs,
     )
 
-    # Inlet height/width dims are measured AT the inlet duct's own height
-    # range, where the local wall X genuinely IS the (larger) duct-stub X -
-    # unlike barrel height above, no correction needed here since these
-    # dimensions and the duct's protrusion occupy the same height band.
+    # Inlet height - measure to the inlet duct's own top edge, which may sit
+    # further than the body's global top Y. Derive actual X position from the
+    # inlet duct's real geometry rather than using nominal inlet_h offset.
     inlet_h_base_x = right_stack.next(arrow_size + text_height_small)
     _linear_dim(
         msp,
-        p1=snap((actual_right_x, actual_top_y - inlet_h - 20)),
-        p2=snap((actual_right_x, actual_top_y - 20)),
+        p1=snap((actual_right_x, actual_top_y - inlet_h - 20), tolerance=LOCAL_SNAP_TOLERANCE),
+        p2=snap((actual_right_x, actual_top_y - 20), tolerance=LOCAL_SNAP_TOLERANCE),
         base=(inlet_h_base_x, actual_top_y - inlet_h - 20), angle=90,
         text_height=text_height_small, attribs=attribs,
     )
 
     # Inlet width W - horizontal, right side, just below the inlet dim.
+    # Use actual right edge X from geometry rather than nominal inlet_w offset,
+    # since the inlet duct's outer edge can sit further than nominal width allows.
     _linear_dim(
         msp,
-        p1=snap((actual_right_x - inlet_w, actual_top_y - inlet_h - 40)),
-        p2=snap((actual_right_x,            actual_top_y - inlet_h - 40)),
+        p1=snap((actual_right_x - inlet_w, actual_top_y - inlet_h - 40), tolerance=LOCAL_SNAP_TOLERANCE),
+        p2=snap((actual_right_x, actual_top_y - inlet_h - 40), tolerance=LOCAL_SNAP_TOLERANCE),
         base=(actual_right_x - inlet_w / 2.0, actual_top_y - inlet_h - 80),
         text_height=text_height_small, attribs=attribs,
     )
