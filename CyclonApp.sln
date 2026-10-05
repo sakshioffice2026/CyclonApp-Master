@@ -19,6 +19,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CyclonApp.Repositories", "C
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CyclonApp.Model", "CyclonApp.Model\CyclonApp.Model.csproj", "{8BCF5A92-CB7F-4DCE-8371-C41F5C308A76}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "AIAgent", "AIAgent", "{02EA681E-C7D8-13C7-8484-4AC65E1B71E8}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EngineeringAI.Core", "..\Wet-Scrubber Solution\03-08-2026\Wet-Scrubber\EngineeringAI.Core\EngineeringAI.Core.csproj", "{9F8A39E4-7389-6B23-85F4-354E4F68C80B}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -49,6 +53,10 @@ Global
 		{8BCF5A92-CB7F-4DCE-8371-C41F5C308A76}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{8BCF5A92-CB7F-4DCE-8371-C41F5C308A76}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{8BCF5A92-CB7F-4DCE-8371-C41F5C308A76}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9F8A39E4-7389-6B23-85F4-354E4F68C80B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9F8A39E4-7389-6B23-85F4-354E4F68C80B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9F8A39E4-7389-6B23-85F4-354E4F68C80B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9F8A39E4-7389-6B23-85F4-354E4F68C80B}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -59,5 +67,6 @@ Global
 		{B03A3F57-8F04-4148-84D3-2673E1AB04DE} = {459F3EFA-66D2-4873-BD04-8D809E66064F}
 		{FF4F3257-CAE1-4BA9-86EB-31A94FC1BB4E} = {459F3EFA-66D2-4873-BD04-8D809E66064F}
 		{8BCF5A92-CB7F-4DCE-8371-C41F5C308A76} = {459F3EFA-66D2-4873-BD04-8D809E66064F}
+		{9F8A39E4-7389-6B23-85F4-354E4F68C80B} = {02EA681E-C7D8-13C7-8484-4AC65E1B71E8}
 	EndGlobalSection
 EndGlobal
