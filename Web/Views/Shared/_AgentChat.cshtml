@@ -1,0 +1,79 @@
+@if (User.Identity?.IsAuthenticated == true &&
+     (User.IsInRole("SuperAdmin") || User.IsInRole("ClientAdmin") || User.IsInRole("Engineer")))
+{
+    <div id="agentChat"
+         class="agent-chat"
+         data-message-url="@Url.Action("Message", "AskAgent")"
+         data-reset-url="@Url.Action("Reset", "AskAgent")"
+         data-projects-url="@Url.Action("Projects", "AskAgent")"
+         data-save-url="@Url.Action("Save", "AskAgent")">
+
+        @Html.AntiForgeryToken()
+
+        <button type="button" class="agent-launcher" id="agentLauncher" aria-label="Open Cyclone Assistant" title="Cyclone Assistant">
+            <i class="bi bi-chat-dots"></i>
+        </button>
+
+        <section class="agent-panel" id="agentPanel" aria-hidden="true" aria-label="Cyclone Assistant">
+
+            <header class="agent-header">
+                <div class="agent-header-icon"><i class="bi bi-wind"></i></div>
+                <div class="agent-header-text">
+                    <span class="agent-header-title">Cyclone Assistant</span>
+                    <span class="agent-header-sub">@(ViewBag.TenantName ?? "Design Suite")</span>
+                </div>
+                <button type="button" class="agent-icon-btn" id="agentReset" title="New design" aria-label="New design">
+                    <i class="bi bi-arrow-counterclockwise"></i>
+                </button>
+                <button type="button" class="agent-icon-btn" id="agentClose" title="Close" aria-label="Close">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </header>
+
+            <div class="agent-draft" id="agentDraftWrap" hidden>
+                <button type="button" class="agent-draft-toggle" id="agentDraftToggle" aria-expanded="true">
+                    <span><i class="bi bi-clipboard-data me-2"></i>Design inputs</span>
+                    <span class="agent-draft-count" id="agentDraftCount">0 / 5</span>
+                    <i class="bi bi-chevron-down agent-draft-chevron"></i>
+                </button>
+                <div class="agent-draft-body" id="agentDraftBody"></div>
+            </div>
+
+            <div class="agent-messages" id="agentMessages" aria-live="polite">
+                <div class="agent-msg agent-msg-bot">
+                    <div class="agent-bubble">
+                        Hi! Tell me about your gas flow, particle size and density, and the cyclone type you have in mind, and I will size the cyclone for you.
+                    </div>
+                </div>
+            </div>
+
+            <div class="agent-chips" id="agentChips">
+                <button type="button" class="agent-chip" data-prompt="Size a Stairmand cyclone for 10,000 m³/h at 150 °C">Size for 10,000 m³/h at 150 °C</button>
+                <button type="button" class="agent-chip" data-prompt="I need a Lapple cyclone for dust with 20 µm average size and 2,500 kg/m³ density">Lapple, 20 µm dust</button>
+                <button type="button" class="agent-chip" data-prompt="Change the inlet temperature to 200 °C and recalculate">Change temperature</button>
+            </div>
+
+            <div class="agent-save" id="agentSave" hidden>
+                <div class="agent-save-title">Create design</div>
+                <label class="agent-label" for="agentProject">Project</label>
+                <select class="form-select form-select-sm" id="agentProject"></select>
+                <label class="agent-label" for="agentTag">Tag number</label>
+                <input type="text" class="form-control form-control-sm" id="agentTag" maxlength="50" placeholder="e.g. CY-101" />
+                <label class="agent-label" for="agentName">Name (optional)</label>
+                <input type="text" class="form-control form-control-sm" id="agentName" maxlength="200" />
+                <div class="agent-save-error" id="agentSaveError" hidden></div>
+                <div class="agent-save-actions">
+                    <button type="button" class="btn btn-outline-primary btn-sm" id="agentSaveCancel">Cancel</button>
+                    <button type="button" class="btn btn-primary btn-sm" id="agentSaveConfirm">Create design</button>
+                </div>
+            </div>
+
+            <div class="agent-input">
+                <textarea id="agentInput" rows="1" maxlength="2000" class="form-control" placeholder="Describe your cyclone requirement…" aria-label="Message"></textarea>
+                <button type="button" class="agent-send" id="agentSend" aria-label="Send">
+                    <i class="bi bi-send-fill"></i>
+                </button>
+            </div>
+        </section>
+    </div>
+}
