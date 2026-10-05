@@ -23,6 +23,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
+		<ProjectReference Include="..\..\Wet-Scrubber Solution\03-08-2026\Wet-Scrubber\EngineeringAI.Core\EngineeringAI.Core.csproj" />
 		<ProjectReference Include="..\CyclonApp.Business\CyclonApp.Business.csproj" />
 		<ProjectReference Include="..\CyclonApp.Database\CyclonApp.Database.csproj" />
 		<ProjectReference Include="..\CyclonApp.Model\CyclonApp.Model.csproj" />
